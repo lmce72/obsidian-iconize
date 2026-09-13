@@ -125,11 +125,22 @@ export default class IconizePlugin extends Plugin {
 
     await this.loadIconFolderData();
 
-    // 立即设置正确的 configPath，并使用新路径重新加载完整配置。
+    // 重定向到配置文件中记录的路径 / Redirect to the path recorded in the config.
+    //
+    // 只有在目标确实存在时才切换：否则会退回默认设置并把它写回，
+    // 从而抹掉原本的指向（指针与它所在文件互相依赖，必须保守处理）。
+    // Only switch when the target really exists; otherwise the plugin falls back to
+    // defaults and writes them back, erasing the pointer it depends on.
     const savedConfigPath = this.getSettings().configFilePath;
-    if (savedConfigPath) {
-      this.setConfigPath(savedConfigPath);
-      await this.loadIconFolderData();
+    if (savedConfigPath && savedConfigPath !== this.getConfigPath()) {
+      if (await this.app.vault.adapter.exists(savedConfigPath)) {
+        this.setConfigPath(savedConfigPath);
+        await this.loadIconFolderData();
+      } else {
+        console.warn(
+          `[${config.PLUGIN_NAME}] Configured config file '${savedConfigPath}' does not exist; keeping '${this.getConfigPath()}'`,
+        );
+      }
     }
 
     logger.toggleLogging(this.getSettings().debugMode);
