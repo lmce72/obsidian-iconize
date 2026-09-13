@@ -90,7 +90,15 @@ export default class IconsPickerModal extends FuzzySuggestModal<any> {
     }
 
     for (const icon of this.plugin.getIconPackManager().allLoadedIconNames) {
-      iconKeys.push(icon);
+      // `displayName` 在拾取器里承担图标标识符的角色（见 onChooseItem），必须是含前缀的完整
+      // 标识。索引包提供的 `displayName` 是原始文件名（如 `rocket-launch`），直接使用会让
+      // 选中后无法解析——尤其是文件名带连字符的第三方图标包。
+      //
+      // `displayName` doubles as the icon identifier in the picker (see onChooseItem), so it
+      // must be the full identifier including the prefix. Index-backed packs report the raw
+      // filename stem (`rocket-launch`), which would not resolve — notably for third-party
+      // packs, whose filenames are usually hyphenated.
+      iconKeys.push({ ...icon, displayName: icon.prefix + icon.name });
     }
 
     Object.entries(emoji.shortNames).forEach(([unicode, shortName]) => {

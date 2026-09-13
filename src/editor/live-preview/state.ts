@@ -85,6 +85,12 @@ export const buildPositionField = (plugin: IconizePlugin) => {
         rawCode.length - identifier.length,
       );
       if (!icon.getIconByName(plugin, iconName)) {
+        // 按需加载：短代码对应的图标可能只在索引中。此处同步执行、无法等待，
+        // 因此排入加载队列；解析完成后内联加载器重绘，届时装饰得以建立。
+        //
+        // The shortcode's icon may only be indexed. This path is synchronous, so queue the
+        // load; the inline loader repaints once it resolves and the decoration is built then.
+        plugin.inlineIconLoader?.requestIcon(iconName);
         continue;
       }
 

@@ -124,6 +124,39 @@ async function initializeWithStore(
 }
 
 /**
+ * 为一个新加入的图标包建立索引并登记到解析器。
+ * Indexes a newly added pack and registers it with the resolver.
+ *
+ * 新导入的图标包必须与启动时发现的包走同一条路径：否则它只存在于旧的内存结构里，
+ * 对按需加载层不可见（解析器找不到、无法按需解析），必须重启 Obsidian 才能用。
+ *
+ * An imported pack must take the same path as packs discovered at startup; otherwise it
+ * lives only in the legacy in-memory structure, invisible to the lazy layer, and only
+ * becomes usable after an Obsidian restart.
+ *
+ * @returns 该图标包的图标数量；按需加载层尚未就绪时返回 0。
+ */
+export async function indexAndRegisterPack(
+  plugin: IconizePlugin,
+  pack: IconPack,
+): Promise<number> {
+  const store = plugin.lazyLoadingSystem?.store;
+  const resolver = plugin.iconResolver;
+
+  if (!store || !resolver) {
+    logger.warn(
+      `Lazy loading is not ready; icon pack '${pack.getName()}' was not indexed`,
+    );
+    return 0;
+  }
+
+  // 同名旧包的缓存必须作废，否则会继续提供旧内容。
+  await resolver.removePackCache(pack.getName());
+
+  return loadPackIndex(store, resolver, pack);
+}
+
+/**
  * 载入（必要时重建）单个图标包的索引，并把它的条目登记到解析器。
  * Loads a pack's index, rebuilding it when missing or out of date, and
  * registers its entries with the resolver.

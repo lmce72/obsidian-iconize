@@ -15,6 +15,7 @@ import {
   isReservedDirectory,
 } from '@app/lib/icon-sources';
 import type { IconSource } from '@app/lib/icon-sources';
+import { indexAndRegisterPack } from '@app/lib/lazy-loading-integration';
 
 export interface Icon {
   name: string;
@@ -152,16 +153,24 @@ export class IconPackManager {
    * 用于归档索引为空、需要回退到同名解压目录的场景。
    */
   public replacePackSource(name: string, source: IconSource): void {
+    // 没有可回退的目录时不做任何改动：先删后加会让图标包凭空消失。
+    // Without a directory to fall back to, change nothing — removing before adding would
+    // make the pack disappear.
+    const folder = this.shadowedFolders.get(name);
+    if (!folder) {
+      logger.warn(
+        `Ignored source replacement for '${name}': no shadowed directory to fall back to`,
+      );
+      return;
+    }
+
     const index = this.iconPacks.findIndex((pack) => pack.getName() === name);
     if (index > -1) {
       this.iconPacks.splice(index, 1);
     }
 
-    const folder = this.shadowedFolders.get(name);
-    if (folder) {
-      this.iconPacks.push(new IconPack(this.plugin, name, true, source));
-      this.shadowedFolders.delete(name);
-    }
+    this.iconPacks.push(new IconPack(this.plugin, name, true, source));
+    this.shadowedFolders.delete(name);
   }
 
   // [LEGACY] 旧方法：全量解压所有图标包到内存（约 2 秒 / 数千个图标），
@@ -383,22 +392,68 @@ export class IconPackManager {
     this.iconPacks.push(iconPack);
   }
 
+  // ===== PATCHED: 导入的图标包与启动时发现的包走同一条索引路径 =====
+  /**
+   * 注册一个新导入的图标包 / Registers a newly imported icon pack.
+   *
+   * 归档落盘后按普通图标包处理：建立索引、登记到解析器。这样导入的包立刻可用，
+   * 且与重启后加载的行为完全一致（包括跨版本宽松路径匹配）。
+   *
+   * The archive is written to disk and then treated like any other pack: indexed and
+   * registered with the resolver, so it works immediately and behaves identically to a
+   * pack discovered at startup.
+   */
   public async registerIconPack(
     name: string,
     arrayBuffer: ArrayBuffer,
   ): Promise<void> {
-    const files = await readZipFile(arrayBuffer);
-    const iconPack = new IconPack(this.plugin, name, false);
-    const loadedIcons: Icon[] = await this.fileManager.getIconsFromZipFile(
-      iconPack,
-      files,
+    // 归档必须落盘：它既是读取源，也是重启后的发现依据。
+    const zipPath = `${this.path}/${name}.zip`;
+    if (!(await this.plugin.app.vault.adapter.exists(zipPath))) {
+      await this.getFileManager().createZipFile(
+        this.path,
+        `${name}.zip`,
+        arrayBuffer,
+      );
+    }
+
+    // 移除同名旧包，避免重复登记。
+    const existing = this.getIconPackByName(name);
+    if (existing) {
+      this.iconPacks = this.iconPacks.filter((pack) => pack.getName() !== name);
+    }
+
+    const iconPack = new IconPack(
+      this.plugin,
+      name,
+      false,
+      new ZipSource(
+        this.plugin.app.vault.adapter,
+        zipPath,
+        getExtraPath(name) ?? '',
+      ),
+      name === LUCIDE_ICON_PACK_NAME ? 'Li' : undefined,
     );
-    iconPack.setIcons(loadedIcons);
-    this.addIconPack(iconPack);
-    logger.info(
-      `Loaded icon pack ${name} (amount of icons: ${loadedIcons.length})`,
-    );
+    this.iconPacks.push(iconPack);
+
+    const count = await indexAndRegisterPack(this.plugin, iconPack);
+    if (count === 0) {
+      // 按需加载层不可用（或归档无可索引图标）时退回旧的内存结构，保证图标仍可用。
+      const files = await readZipFile(arrayBuffer);
+      const loadedIcons: Icon[] = await this.fileManager.getIconsFromZipFile(
+        iconPack,
+        files,
+      );
+      iconPack.setIcons(loadedIcons);
+      logger.info(
+        `Loaded icon pack ${name} into memory (amount of icons: ${loadedIcons.length})`,
+      );
+      return;
+    }
+
+    logger.info(`Registered icon pack ${name} (amount of icons: ${count})`);
   }
+  // ===== END PATCH =====
 
   public async moveIconPackDirectories(
     from: string,
