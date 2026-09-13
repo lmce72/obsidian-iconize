@@ -71,6 +71,22 @@ Layer 3 图标包   首次使用，读取该条目并写入缓存
 - `dom.setIconForNode()` 成为同步渲染路径的统一入口，内存未命中时异步按需解析后再填充，
   文件浏览器 / 标签页 / 标题 / 图标拾取器因此共用同一套按需逻辑。
 
+### 图标配置保护（取代原先的硬编码文件名防护）
+
+原实现在 `removeFolderIcon()` 里硬编码保护单个文件名（该文件是启动时的活动文件）。
+真正的缺陷在 frontmatter 同步逻辑：
+
+1. 布局就绪时把**活动文件**记入 `frontmatterCache`，却不检查它是否真的用过 `icon` 属性；
+2. frontmatter 解析时，只要路径在 `frontmatterCache` 中且当前没有 `icon` 属性，
+   就判定为「图标已被移除」并删除 `data` 中该文件的图标配置。
+
+于是任何作为活动文件打开、且恰好配置过图标、又没有 `icon` 属性的文件，
+都会在 frontmatter 解析时被静默删掉图标。
+
+修复：`frontmatterCache` 由 `Set<string>` 改为 `Map<string, string>`（记录路径 → 实际见过的
+frontmatter 图标名），只在文件确实通过 frontmatter 提供过图标时才记录。
+这样既堵住误删，又保留预期行为——用户清空 frontmatter 的 `icon` 属性时图标仍会被移除。
+
 ### 外部 SVG 清理
 
 图标包保持压缩，不再解压出 `.obsidian/icons/<pack>/<name>.svg` 外部文件：

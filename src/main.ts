@@ -86,7 +86,19 @@ export default class IconizePlugin extends Plugin {
 
   public positionField: PositionField = buildPositionField(this);
 
-  private frontmatterCache = new Set<string>();
+  /**
+   * 记录「图标来自 frontmatter」的路径及其图标名。
+   * Paths whose icon came from frontmatter, mapped to the icon name seen there.
+   *
+   * 只有真正从 frontmatter 取过图标的路径才会被记录。仅凭「文件曾经是活动文件」就记录，
+   * 会让一个从未用过 `icon` 属性的文件在 frontmatter 解析时被误判为「图标已被移除」，
+   * 进而删掉它在 data 里正常配置的图标。
+   *
+   * Only paths that actually supplied an icon from frontmatter are recorded. Recording
+   * a path merely because it was the active file makes the resolver treat a file that
+   * never used the `icon` property as "icon removed" and drop its configured icon.
+   */
+  private frontmatterCache = new Map<string, string>();
   private eventEmitter = new EventEmitter();
 
   private iconPackManager: IconPackManager;
@@ -491,8 +503,14 @@ export default class IconizePlugin extends Plugin {
 
       if (this.getSettings().iconInFrontmatterEnabled) {
         const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile) {
-          this.frontmatterCache.add(activeFile.path);
+        // 只在该文件确实通过 frontmatter 指定了图标时记录，避免误判为「图标已移除」。
+        const frontmatterIcon = activeFile
+          ? this.app.metadataCache.getFileCache(activeFile)?.frontmatter?.[
+              this.getSettings().iconInFrontmatterFieldName
+            ]
+          : undefined;
+        if (activeFile && typeof frontmatterIcon === 'string') {
+          this.frontmatterCache.set(activeFile.path, frontmatterIcon);
         }
       }
 
@@ -660,6 +678,9 @@ export default class IconizePlugin extends Plugin {
             } = fileCache.frontmatter;
             // If `icon` property is empty, we will remove it from the data and remove the icon.
             if (!newIconName) {
+              // 只有当这个文件此前确实从 frontmatter 取过图标时才移除；
+              // 否则一个从未用过 `icon` 属性的文件会被误删已配置的图标。
+              // Only remove when this file previously supplied an icon from frontmatter.
               if (this.frontmatterCache.has(file.path)) {
                 await this.removeSingleIcon(file);
                 this.frontmatterCache.delete(file.path);
@@ -694,7 +715,7 @@ export default class IconizePlugin extends Plugin {
               return;
             }
 
-            this.frontmatterCache.add(file.path);
+            this.frontmatterCache.set(file.path, newIconName);
             try {
               if (!emoji.isEmoji(newIconName)) {
                 saveIconToIconPack(this, newIconName);
