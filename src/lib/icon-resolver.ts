@@ -264,7 +264,23 @@ export class IconResolver {
         return null;
       }
       const content = await this.plugin.app.vault.adapter.read(path);
-      return JSON.parse(content);
+      const parsed = JSON.parse(content);
+
+      // 缓存条目必须自带可用标记：截断写入或旧格式会解析出 `{}`，
+      // 若当作命中返回，调用方会把 `undefined` 写进 DOM，渲染出字符串 "undefined"。
+      //
+      // A cache entry must carry usable markup: a truncated write or an older schema
+      // parses to `{}`, and returning that as a hit makes the caller write `undefined`
+      // into the DOM, rendering the literal text "undefined".
+      if (
+        !parsed ||
+        typeof parsed.svgElement !== 'string' ||
+        parsed.svgElement === ''
+      ) {
+        return null;
+      }
+
+      return parsed;
     } catch {
       // 缓存未命中静默失败即可。
       return null;
@@ -334,6 +350,17 @@ export class IconResolver {
    * 移除特定图标包的缓存 / Forgets every in-memory icon belonging to a pack.
    */
   async removePackCache(packName: string): Promise<void> {
+    // 先收集该包的图标 id：磁盘缓存以 id 命名，entry 随 lookup 一起被删掉后就找不到了。
+    // Collect the pack's icon ids first: the disk cache is keyed by id, and those entries
+    // are gone once the lookup rows are removed.
+    const iconIds = new Set<string>();
+    for (const [key, located] of this.lookup) {
+      if (located.packName === packName) {
+        iconIds.add(located.entry.id);
+        this.lookup.delete(key);
+      }
+    }
+
     for (const [key, value] of this.memoryCache) {
       if (value.iconPackName === packName) {
         this.memoryCache.delete(key);
@@ -344,9 +371,20 @@ export class IconResolver {
         this.previews.delete(key);
       }
     }
-    for (const [key, located] of this.lookup) {
-      if (located.packName === packName) {
-        this.lookup.delete(key);
+
+    // 磁盘缓存同样必须作废，否则下一次解析会在第 2 层命中旧内容。
+    // The disk tier must be invalidated too, or the next resolve hits stale markup.
+    for (const iconId of iconIds) {
+      try {
+        const path = this.cachePathOf(iconId);
+        if (await this.plugin.app.vault.adapter.exists(path)) {
+          await this.plugin.app.vault.adapter.remove(path);
+        }
+      } catch (error) {
+        console.warn(
+          `[IconResolver] Could not remove cached icon '${iconId}':`,
+          error,
+        );
       }
     }
   }

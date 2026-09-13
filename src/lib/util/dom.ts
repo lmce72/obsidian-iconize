@@ -49,6 +49,13 @@ const removeIconInPath = (path: string, options?: RemoveOptions): void => {
 interface SetIconForNodeOptions {
   color?: string;
   shouldApplyAllStyles?: boolean;
+  /**
+   * 是否把解析结果写入磁盘缓存 / Whether the resolved icon is written to the disk cache.
+   *
+   * 浏览图标拾取器会触及上千个图标，其中绝大多数只是预览，不该逐个落盘。
+   * Browsing the picker touches thousands of icons that are only ever previewed.
+   */
+  persist?: boolean;
 }
 
 /**
@@ -113,10 +120,22 @@ const setIconForNode = (
   // 按需加载：图标在索引中但尚未解析时，异步取回后再填充。
   const resolver = plugin.iconResolver;
   if (resolver?.find(iconName)) {
+    // 标记该节点当前代表哪个图标，作为异步回调的比对依据（预览节点没有这个属性）。
+    // Mark what the node currently stands for, so the async callback can compare against it.
+    if (!node.hasAttribute(config.ICON_ATTRIBUTE_NAME)) {
+      node.setAttribute(config.ICON_ATTRIBUTE_NAME, iconName);
+    }
+
     resolver
-      .resolve(iconName)
+      .resolve(iconName, { persist: options.persist ?? true })
       .then((icon) => {
         if (!icon || !node.isConnected) {
+          return;
+        }
+        // 节点可能已被复用去显示另一个图标——异步结果晚到时不能覆盖它。
+        // The node may have been reused for a different icon; a late result must not
+        // overwrite it.
+        if (node.getAttribute(config.ICON_ATTRIBUTE_NAME) !== iconName) {
           return;
         }
         applyIconContent(plugin, icon.svgElement, node, options, iconName);

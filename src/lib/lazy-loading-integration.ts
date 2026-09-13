@@ -105,6 +105,16 @@ async function initializeWithStore(
 
   // 预取已用图标，使同步渲染路径能找到它们。
   const result = await resolver.prefetch(usedIconNames);
+
+  // 索引与预取都已完成，释放每个源解析过的归档：否则所有 zip 会常驻内存整个会话，
+  // 恰好抵消按需加载的内存目标。`readEntry` 会按需重新打开。
+  //
+  // Indexing and prefetching are done, so release every parsed archive; otherwise all zips
+  // stay resident for the session, cancelling out the point of lazy loading. Sources
+  // reopen transparently on the next read.
+  for (const pack of manager.getIconPacks()) {
+    pack.getSource()?.dispose();
+  }
   if (
     result.failed.length > 0 &&
     plugin.getSettings().iconsBackgroundCheckEnabled
@@ -153,7 +163,13 @@ export async function indexAndRegisterPack(
   // 同名旧包的缓存必须作废，否则会继续提供旧内容。
   await resolver.removePackCache(pack.getName());
 
-  return loadPackIndex(store, resolver, pack);
+  const count = await loadPackIndex(store, resolver, pack);
+
+  // 索引建好后即可释放归档；新包落定后，之前加载失败的图标值得重试一次。
+  pack.getSource()?.dispose();
+  plugin.inlineIconLoader?.clearFailedList();
+
+  return count;
 }
 
 /**

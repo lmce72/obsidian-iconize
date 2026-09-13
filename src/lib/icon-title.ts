@@ -19,6 +19,14 @@ interface Options {
    * set, so `currentColor` and explicit fill/stroke icons are both colored.
    */
   color?: string;
+  /**
+   * 该标题图标对应的标识 / Identifier this title icon stands for.
+   *
+   * 内联标题元素会跨文件复用，异步解析晚到时需要据此判断结果是否仍然适用。
+   * The inline title element is reused across files, so a late async result needs this to
+   * tell whether it still applies.
+   */
+  iconName?: string;
 }
 
 const add = (
@@ -54,6 +62,7 @@ const add = (
   }
 
   titleIcon.classList.add(config.TITLE_ICON_CLASS);
+  titleIcon.setAttribute(config.ICON_ATTRIBUTE_NAME, options?.iconName ?? '');
   // Checks if the passed element is an emoji.
   if (emoji.isEmoji(svgElement) && options.fontSize) {
     svgElement =
@@ -181,4 +190,5 @@ export default {
   updateStyle,
   hide,
   remove,
+  get: getTitleIcon,
 };

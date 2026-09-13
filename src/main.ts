@@ -109,11 +109,8 @@ export default class IconizePlugin extends Plugin {
   public lazyLoadingSystem?: LazyLoadingSystem;
   public iconResolver?: IconResolver;
   public inlineIconLoader?: InlineIconLoader;
-  private _iconsReady = false;
   private _saveDebounceTimer: number | null = null;
   private _savePending = false;
-  private _eventListenerRefs: Array<() => void> = [];
-  private _tabIconObservers = new Map<string, MutationObserver>();
   private configPath = '.obsidian/plugins/obsidian-icon-folder/data.json';
   // ===== END PATCH =====
 
@@ -405,7 +402,6 @@ export default class IconizePlugin extends Plugin {
     if (!system) {
       // [LEGACY] 回退到旧的全量预载逻辑，日后可移除。
       await this.iconPackManager.loadUsedIcons(usedIconNames);
-      this._iconsReady = true;
       this.eventEmitter.emit('allIconsLoaded');
       return;
     }
@@ -413,7 +409,6 @@ export default class IconizePlugin extends Plugin {
     this.lazyLoadingSystem = system;
     this.iconResolver = system.resolver;
     this.inlineIconLoader = system.loader;
-    this._iconsReady = true;
     this.eventEmitter.emit('allIconsLoaded');
   }
   // ===== END PATCH =====
@@ -838,6 +833,7 @@ export default class IconizePlugin extends Plugin {
       titleIcon.add(this, inlineTitleEl, iconNameWithPrefix, {
         fontSize: calculateInlineTitleSize(),
         color,
+        iconName: iconNameWithPrefix,
       });
       return;
     }
@@ -848,6 +844,7 @@ export default class IconizePlugin extends Plugin {
       titleIcon.add(this, inlineTitleEl, foundIcon, {
         fontSize: calculateInlineTitleSize(),
         color,
+        iconName: iconNameWithPrefix,
       });
       return;
     }
@@ -860,10 +857,22 @@ export default class IconizePlugin extends Plugin {
           if (!svgMarkup || !inlineTitleEl.isConnected) {
             return;
           }
+          // 内联标题元素跨文件复用：若它此刻代表的是别的图标，说明用户已经切走，丢弃这次结果。
+          // The inline title is reused across files; if it now stands for a different icon
+          // the user has moved on, so drop this result.
+          const current = inlineTitleEl.parentElement
+            ? titleIcon.get(inlineTitleEl.parentElement)
+            : null;
+          const marker = current?.getAttribute(config.ICON_ATTRIBUTE_NAME);
+          if (marker && marker !== iconNameWithPrefix) {
+            return;
+          }
+
           titleIcon.remove(inlineTitleEl);
           titleIcon.add(this, inlineTitleEl, svgMarkup, {
             fontSize: calculateInlineTitleSize(),
             color,
+            iconName: iconNameWithPrefix,
           });
         })
         .catch((error) =>
@@ -915,22 +924,19 @@ export default class IconizePlugin extends Plugin {
       this.iconResolver = undefined;
       this.inlineIconLoader = undefined;
     }
-    // ===== END PATCH =====
 
-    // ===== PATCHED: 清理 folder note 相关资源 / Cleanup folder note resources =====
-    for (const unsubscribe of this._eventListenerRefs) {
-      try {
-        unsubscribe();
-      } catch (error) {
-        console.warn('[Iconize] Failed to unsubscribe event:', error);
-      }
+    // 释放每个源持有的已解析归档，并撤掉调试用全局引用——它会连同整个插件实例
+    // （以及所有归档）一起把内存留住，禁用插件而不重载时尤其明显。
+    //
+    // Release every parsed archive and drop the debug global: it keeps the whole plugin
+    // instance (and its archives) alive, which matters when disabling without a reload.
+    for (const pack of this.iconPackManager?.getIconPacks() ?? []) {
+      pack.getSource()?.dispose();
     }
-    this._eventListenerRefs = [];
-
-    for (const observer of this._tabIconObservers.values()) {
-      observer.disconnect();
+    const globalScope = window as unknown as { iconizePlugin?: IconizePlugin };
+    if (globalScope.iconizePlugin === this) {
+      delete globalScope.iconizePlugin;
     }
-    this._tabIconObservers.clear();
     // ===== END PATCH =====
   }
 

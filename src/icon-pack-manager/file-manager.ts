@@ -40,7 +40,9 @@ export class FileManager {
       `${path}/${iconPackName}/${normalizedFilename}`,
     );
     if (exists) {
-      const folderSplit = absoluteFilename.split('/');
+      // `absoluteFilename` 是可选参数（两个调用方都没传），缺失时不能直接解引用。
+      // `absoluteFilename` is optional and both callers omit it, so it must be guarded.
+      const folderSplit = (absoluteFilename ?? '').split('/');
       if (folderSplit.length >= 2) {
         const folderName = folderSplit[folderSplit.length - 2];
         const newFilename = folderName + normalizedFilename;

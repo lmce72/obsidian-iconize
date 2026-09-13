@@ -176,6 +176,9 @@ export class InlineIconLoader {
   reset(): void {
     this.pending.clear();
     this.failed.clear();
+    // 不清 `inFlight` 会让加载器重置后永久拒绝调度新批次。
+    // Leaving `inFlight` set makes the loader refuse to schedule any further batch.
+    this.inFlight = false;
 
     if (this.timer !== null) {
       window.clearTimeout(this.timer);

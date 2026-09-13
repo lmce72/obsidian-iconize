@@ -23,6 +23,10 @@ const checkMissingIcons = async (
 ): Promise<void> => {
   const missingIcons: Set<Icon> = new Set();
   const allIcons: Map<string, boolean> = new Map();
+  // 按需加载下图标不再解压成外部文件，因此「缺失」= 解析器完全找不到它。
+  // Under lazy loading nothing is extracted, so "missing" means the resolver cannot find
+  // the icon at all. Collected here to surface a signal to the user.
+  const unresolvableIcons: string[] = [];
 
   const getMissingIcon = async (
     iconNameWithPrefix: string,
@@ -64,6 +68,7 @@ const checkMissingIcons = async (
         logger.error(
           `Icon ${iconNameWithPrefix} is not present in any installed icon pack`,
         );
+        unresolvableIcons.push(iconNameWithPrefix);
         return null;
       }
 
@@ -125,6 +130,20 @@ const checkMissingIcons = async (
   if (missingIcons.size !== 0) {
     new Notice(
       `[${config.PLUGIN_NAME}] Background Check: found missing icons. Adding missing icons...`,
+      10000,
+    );
+  }
+
+  // 报告确实找不到来源的图标：这是用户唯一能得知「某个图标没装」的信号。
+  // Report icons with no source at all — the only signal the user gets that an icon's
+  // pack is not installed.
+  if (unresolvableIcons.length !== 0) {
+    const unique = [...new Set(unresolvableIcons)];
+    logger.warn(
+      `${unique.length} icon(s) are not present in any installed icon pack: ${unique.join(', ')}`,
+    );
+    new Notice(
+      `[${config.PLUGIN_NAME}] ${unique.length} icon(s) have no installed icon pack (e.g. ${unique.slice(0, 3).join(', ')})`,
       10000,
     );
   }

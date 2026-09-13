@@ -201,8 +201,14 @@ export default class IconsPickerModal extends FuzzySuggestModal<any> {
     el.appendChild(labelEl);
     el.appendChild(previewEl);
 
+    // `persist: false` 让预览走有上限、不落盘的内存层：浏览大图标包会触及上千个图标，
+    // 逐个写入磁盘缓存并常驻内存是不可接受的。
+    //
+    // `persist: false` keeps previews in the bounded, never-persisted tier: a large pack
+    // touches thousands of icons, which must not each be written to disk and retained.
     dom.setIconForNode(this.plugin, iconNameWithPrefix, previewEl, {
       shouldApplyAllStyles: false,
+      persist: false,
     });
   }
 }

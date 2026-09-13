@@ -110,6 +110,20 @@ export class ZipSource implements IconSource {
     return firstSlash === -1 ? '' : this.extraPath.substring(firstSlash + 1);
   }
 
+  /**
+   * 判断条目是否位于某个路径片段之下。
+   * Whether an entry sits under a path fragment.
+   *
+   * 归档既可能在片段前还有一层包装目录（`pack-x/svgs/solid/…`），也可能直接从该片段开始
+   * （`svgs/solid/…`）。两种都要认，否则没有包装目录的归档会索引不到任何图标。
+   *
+   * The fragment may follow a wrapper directory or start the entry, and both must match;
+   * otherwise an archive without a wrapper indexes to nothing.
+   */
+  private underFragment(name: string, fragment: string): boolean {
+    return name.startsWith(fragment) || name.includes(`/${fragment}`);
+  }
+
   public async listEntries(): Promise<RawEntry[]> {
     const names = await this.listNames();
     const svgs = names.filter((name) => this.isSvg(name));
@@ -118,18 +132,27 @@ export class ZipSource implements IconSource {
       return svgs.map((path) => ({ path }));
     }
 
-    const exact = svgs.filter((name) => name.startsWith(this.extraPath));
+    const exact = svgs.filter((name) =>
+      this.underFragment(name, this.extraPath),
+    );
     if (exact.length > 0) {
       return exact.map((path) => ({ path }));
     }
 
     // 精确路径没有匹配，多半是安装的归档版本与固定路径不同。
-    const relaxed = this.relaxedExtraPath();
-    if (relaxed !== '') {
-      const matched = svgs.filter((name) => name.includes(`/${relaxed}`));
+    // 逐级放宽：先去掉带版本号的首段，再退到路径末段。
+    const relaxedCandidates = [
+      this.relaxedExtraPath(),
+      this.extraPath.substring(this.extraPath.lastIndexOf('/') + 1),
+    ].filter((candidate) => candidate !== '');
+
+    for (const candidate of relaxedCandidates) {
+      const matched = svgs.filter((name) =>
+        this.underFragment(name, candidate),
+      );
       if (matched.length > 0) {
         logger.info(
-          `Matched icon pack entries in '${this.zipPath}' on relaxed path '${relaxed}' because '${this.extraPath}' matched nothing`,
+          `Matched icon pack entries in '${this.zipPath}' on relaxed path '${candidate}' because '${this.extraPath}' matched nothing`,
         );
         return matched.map((path) => ({ path }));
       }
@@ -240,7 +263,7 @@ export class FolderSource implements IconSource {
  * Whether a directory is generated state rather than a user's icon pack.
  */
 export function isReservedDirectory(name: string): boolean {
-  return name === '.cache' || name.startsWith('.');
+  return name.startsWith('.');
 }
 
 /**

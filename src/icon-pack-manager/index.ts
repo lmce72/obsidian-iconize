@@ -566,13 +566,25 @@ export class IconPackManager {
   }
 
   public async removeIconPack(iconPack: IconPack): Promise<void> {
+    const name = iconPack.getName();
+
+    // 必须传删除个数：`splice(index)` 会从该位置起删掉其后所有图标包。
+    // The delete count is required: `splice(index)` drops every pack from that index on.
     const iconPackIndex = this.iconPacks.findIndex(
-      (ip) => ip.getName() === iconPack.getName(),
+      (ip) => ip.getName() === name,
     );
     if (iconPackIndex > -1) {
-      this.iconPacks.splice(iconPackIndex);
+      this.iconPacks.splice(iconPackIndex, 1);
     }
+
+    iconPack.getSource()?.dispose();
     await iconPack.delete();
+
+    // 解析器与索引必须一并作废，否则已删除的包仍会从内存/磁盘缓存里继续提供图标。
+    // The resolver and the stored index must be invalidated too, or the removed pack keeps
+    // serving icons from the memory and disk caches.
+    await this.plugin.iconResolver?.removePackCache(name);
+    await this.plugin.lazyLoadingSystem?.store.delete(name);
   }
 
   public getLucideIconPack(): LucideIconPack {

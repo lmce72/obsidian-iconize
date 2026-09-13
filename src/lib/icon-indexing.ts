@@ -251,7 +251,12 @@ export async function buildIndex(
     packName,
     prefix,
     sourceType: source.type,
-    fingerprint: { ...fingerprint, count: entries.length },
+    // 指纹必须原样保留源报告的计数：`entries` 已经过滤掉命名不合法的文件，
+    // 用它覆盖计数会让「索引计数 ≠ 源计数」永久成立，每次启动都判定为过期并重建。
+    //
+    // Keep the source's own count: `entries` has invalid names filtered out, and storing
+    // that count here would make the index permanently stale and rebuild on every launch.
+    fingerprint,
     builtAt: Date.now(),
     entries,
   };

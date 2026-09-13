@@ -2,6 +2,7 @@ import { FileItem, FileWithLeaf } from './@types/obsidian';
 import { LUCIDE_ICON_PACK_NAME } from './icon-pack-manager/lucide';
 import { getSvgFromLoadedIcon, nextIdentifier } from './icon-pack-manager/util';
 import IconizePlugin from './main';
+import { logger } from './lib/logger';
 
 // Default obsidian file icon.
 export const DEFAULT_FILE_ICON =
@@ -123,7 +124,17 @@ const extractIconIntoPack = (
     return;
   }
 
+  // 索引包只按 id/规范化名建索引，原始名可能查不到；此时无条目可写，静默跳过。
+  // Index-backed packs are keyed by id and normalized name, so the raw name may miss;
+  // there is then nothing to write, so skip quietly instead of dereferencing undefined.
   const icon = iconPack.getIcon(iconName);
+  if (!icon) {
+    logger.info(
+      `Skipped extracting '${iconPrefix}${iconName}': no matching entry in pack '${iconPack.getName()}'`,
+    );
+    return;
+  }
+
   plugin.getIconPackManager().extractIcon(icon, possibleIcon);
 };
 
