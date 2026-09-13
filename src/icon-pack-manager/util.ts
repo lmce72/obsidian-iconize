@@ -21,6 +21,14 @@ export function getSvgFromLoadedIcon(
   iconName: string,
 ): string {
   let icon = '';
+
+  // ===== PATCHED: 优先从按需加载解析器内存缓存查找 / Check resolver cache first =====
+  const resolved = plugin.iconResolver?.peek(iconPrefix + iconName);
+  if (resolved) {
+    return resolved.svgElement;
+  }
+  // ===== END PATCH =====
+
   let foundIcon = plugin
     .getIconPackManager()
     .getPreloadedIcons()
@@ -51,6 +59,9 @@ export function getSvgFromLoadedIcon(
     icon = foundIcon.svgElement;
   }
 
+  // 索引包只提供元数据（`svgElement` 为空），此时返回空串让调用方走按需解析。
+  // Index-backed packs provide metadata only; an empty result signals the caller to
+  // resolve on demand instead.
   return icon;
 }
 

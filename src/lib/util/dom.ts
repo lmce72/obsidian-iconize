@@ -52,8 +52,37 @@ interface SetIconForNodeOptions {
 }
 
 /**
+ * 把图标内容应用到节点上 / Applies icon content to a node.
+ *
+ * 同步与异步两条路径共用，避免样式逻辑散落成两份。
+ * Shared by the synchronous and on-demand paths so the styling logic exists once.
+ */
+const applyIconContent = (
+  plugin: IconizePlugin,
+  content: string,
+  node: HTMLElement,
+  options: SetIconForNodeOptions,
+  iconName: string,
+): void => {
+  let iconContent = options.shouldApplyAllStyles
+    ? style.applyAll(plugin, content, node)
+    : content;
+  if (options.color) {
+    node.style.color = options.color;
+    iconContent = svg.colorize(iconContent, options.color);
+  }
+  node.innerHTML = iconContent;
+  node.setAttribute('title', iconName);
+};
+
+/**
  * Sets an icon or emoji for an HTMLElement based on the specified icon name and color.
  * The function manipulates the specified node inline.
+ *
+ * 内存中没有该图标时会异步按需解析（磁盘缓存 → 图标包），解析完成后若节点仍挂在文档中则填充。
+ * Icons missing from memory are resolved on demand; the node is filled once resolved,
+ * provided it is still attached to the document.
+ *
  * @param plugin Instance of the IconizePlugin.
  * @param iconName Name of the icon or emoji to add.
  * @param node HTMLElement to which the icon or emoji will be added.
@@ -77,24 +106,33 @@ const setIconForNode = (
   );
 
   if (possibleIcon) {
-    // The icon is possibly not an emoji.
-    let iconContent = options?.shouldApplyAllStyles
-      ? style.applyAll(plugin, possibleIcon, node)
-      : possibleIcon;
-    if (options?.color) {
-      node.style.color = options.color;
-      iconContent = svg.colorize(iconContent, options.color);
-    }
-    node.innerHTML = iconContent;
-  } else {
-    const parsedEmoji =
-      emoji.parseEmoji(plugin.getSettings().emojiStyle, iconName) ?? iconName;
-    node.innerHTML = options?.shouldApplyAllStyles
-      ? style.applyAll(plugin, parsedEmoji, node)
-      : parsedEmoji;
+    applyIconContent(plugin, possibleIcon, node, options, iconName);
+    return;
   }
 
-  node.setAttribute('title', iconName);
+  // 按需加载：图标在索引中但尚未解析时，异步取回后再填充。
+  const resolver = plugin.iconResolver;
+  if (resolver?.find(iconName)) {
+    resolver
+      .resolve(iconName)
+      .then((icon) => {
+        if (!icon || !node.isConnected) {
+          return;
+        }
+        applyIconContent(plugin, icon.svgElement, node, options, iconName);
+      })
+      .catch((error) => {
+        console.error(
+          `[Iconize] Failed to resolve icon '${iconName}' on demand:`,
+          error,
+        );
+      });
+    return;
+  }
+
+  const parsedEmoji =
+    emoji.parseEmoji(plugin.getSettings().emojiStyle, iconName) ?? iconName;
+  applyIconContent(plugin, parsedEmoji, node, options, iconName);
 };
 
 interface CreateOptions {

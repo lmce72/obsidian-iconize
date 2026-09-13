@@ -143,6 +143,10 @@ export const processIconInTextMarkdown = (
           );
         }
       });
+    } else {
+      // ===== PATCHED: 按需加载未在内存的内联图标（懒加载）/ Load inline icon on demand =====
+      plugin.inlineIconLoader?.requestIcon(iconName);
+      // ===== END PATCH =====
     }
   });
 

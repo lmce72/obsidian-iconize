@@ -10,6 +10,15 @@ const getTitleIcon = (leaf: HTMLElement): HTMLElement | null => {
 
 interface Options {
   fontSize?: number;
+  /**
+   * 图标颜色 / Color of the icon.
+   *
+   * 与标签页图标一致：同时设置容器颜色与 SVG 的绘制属性，
+   * 这样 `currentColor` 与显式 fill/stroke 两种图标都能着色。
+   * Mirrors the tab icon: both the container color and the SVG paint attribute are
+   * set, so `currentColor` and explicit fill/stroke icons are both colored.
+   */
+  color?: string;
 }
 
 const add = (
@@ -55,6 +64,18 @@ const add = (
       ) ?? svgElement;
     titleIcon.style.fontSize = `${options.fontSize}px`;
   }
+
+  // 应用颜色：显式设置的颜色覆盖主题色，未设置时清除残留，避免切换文件后沿用上一个图标颜色。
+  // Applies the color, clearing any previous one so switching files cannot inherit it.
+  if (options?.color) {
+    titleIcon.style.color = options.color;
+    if (!emoji.isEmoji(svgElement)) {
+      svgElement = svg.colorize(svgElement, options.color);
+    }
+  } else {
+    titleIcon.style.removeProperty('color');
+  }
+
   titleIcon.innerHTML = svgElement;
 
   let wrapperElement = inlineTitleEl.parentElement;

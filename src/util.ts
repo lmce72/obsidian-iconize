@@ -78,13 +78,47 @@ export const saveIconToIconPack = (
   const iconPrefix = iconNameWithPrefix.substring(0, iconNextIdentifier);
   const possibleIcon = getSvgFromLoadedIcon(plugin, iconPrefix, iconName);
   if (!possibleIcon) {
+    // 按需加载下图标可能只在索引中尚未解析：异步取回后再写入，避免误报“找不到”。
+    // Under lazy loading the icon may be indexed but not yet resolved; take it from the
+    // resolver instead of reporting it as missing.
+    const resolver = plugin.iconResolver;
+    if (resolver?.find(iconNameWithPrefix)) {
+      resolver
+        .resolveSvg(iconNameWithPrefix)
+        .then((svgMarkup) => {
+          if (svgMarkup) {
+            extractIconIntoPack(plugin, iconPrefix, iconName, svgMarkup);
+          }
+        })
+        .catch((error) =>
+          console.error(
+            `[Iconize] Failed to save icon ${iconNameWithPrefix} to icon pack:`,
+            error,
+          ),
+        );
+      return;
+    }
+
     throw new Error(`Icon ${iconNameWithPrefix} could not be found.`);
   }
 
+  extractIconIntoPack(plugin, iconPrefix, iconName, possibleIcon);
+};
+
+/**
+ * 把已解析的图标标记写入对应的图标包 / Writes resolved icon markup into its icon pack.
+ */
+const extractIconIntoPack = (
+  plugin: IconizePlugin,
+  iconPrefix: string,
+  iconName: string,
+  possibleIcon: string,
+): void => {
   const iconPack = plugin.getIconPackManager().getIconPackByPrefix(iconPrefix);
   if (
-    iconPack.getName() === LUCIDE_ICON_PACK_NAME &&
-    !plugin.doesUseCustomLucideIconPack()
+    !iconPack ||
+    (iconPack.getName() === LUCIDE_ICON_PACK_NAME &&
+      !plugin.doesUseCustomLucideIconPack())
   ) {
     return;
   }

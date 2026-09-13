@@ -20,6 +20,21 @@ export class FileManager {
     content: string,
     absoluteFilename?: string,
   ): Promise<void> {
+    // ===== PATCHED: 仅允许在自定义图标包目录内创建文件 =====
+    // 归档图标包保持压缩，图标只存在于归档与缓存中，不再解压成外部 SVG 文件。
+    // Archived packs stay compressed; icons live in the archive and the cache, never
+    // as extracted SVG files.
+    const pack = this.plugin
+      .getIconPackManager()
+      .getIconPackByName(iconPackName);
+    if (!pack || !pack.isCustomPack()) {
+      logger.warn(
+        `Prevented external SVG write: ${iconPackName}/${filename} (not a custom pack)`,
+      );
+      return;
+    }
+    // ===== END PATCH =====
+
     const normalizedFilename = getNormalizedName(filename);
     const exists = await this.plugin.app.vault.adapter.exists(
       `${path}/${iconPackName}/${normalizedFilename}`,

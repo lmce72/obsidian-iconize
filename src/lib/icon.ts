@@ -53,6 +53,26 @@ const checkMissingIcons = async (
       return null;
     }
 
+    // ===== PATCHED: 以“能否解析”判断缺失，而非外部 SVG 文件是否存在 =====
+    // 按需加载下归档保持压缩，不再解压出外部 SVG 文件，因此文件存在性检查恒为假；
+    // 图标只要能被解析就不算缺失。
+    // Under lazy loading no external SVG files exist, so existence checks are always
+    // false; an icon counts as missing only when it cannot be resolved at all.
+    const resolver = plugin.iconResolver;
+    if (resolver) {
+      if (!resolver.find(iconNameWithPrefix)) {
+        logger.error(
+          `Icon ${iconNameWithPrefix} is not present in any installed icon pack`,
+        );
+        return null;
+      }
+
+      // 确保进入缓存，供同步渲染路径使用。
+      await resolver.resolve(iconNameWithPrefix);
+      return null;
+    }
+    // ===== END PATCH =====
+
     const doesIconFileExists = await plugin.app.vault.adapter.exists(
       `${plugin.getIconPackManager().getPath()}/${iconPack.getName()}/${iconName}.svg`,
     );
@@ -342,6 +362,12 @@ const getIconByName = (
   plugin: IconizePlugin,
   iconNameWithPrefix: string,
 ): Icon | null => {
+  // ===== PATCHED: 优先从按需加载解析器内存缓存查找 / Check resolver cache first =====
+  const resolved = plugin.iconResolver?.peek(iconNameWithPrefix);
+  if (resolved) {
+    return resolved as Icon;
+  }
+  // ===== END PATCH =====
   const iconNextIdentifier = nextIdentifier(iconNameWithPrefix);
   const iconName = iconNameWithPrefix.substring(iconNextIdentifier);
   const iconPrefix = iconNameWithPrefix.substring(0, iconNextIdentifier);
@@ -351,7 +377,11 @@ const getIconByName = (
   }
 
   const icon = iconPack.getIcon(iconName);
-  if (!icon) {
+  // 按需加载下索引包只返回元数据（`svgElement` 为空）。此时同步路径拿不到标记，
+  // 必须返回 `null` 让调用方走按需解析，否则会注入空内容。
+  // Index-backed packs return metadata only; returning it would inject empty content,
+  // so callers must fall through to the on-demand path instead.
+  if (!icon || !icon.svgElement) {
     return null;
   }
 

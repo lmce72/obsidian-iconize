@@ -186,6 +186,33 @@ export interface IconFolderSettings {
    * @default false
    */
   useInternalPlugins?: boolean;
+  // ===== PATCHED: 自定义配置文件目录 + Folder note 图标继承 / 双向同步 =====
+  /**
+   * Path of the config file that stores the plugin data (icons, rules, settings).
+   * @default '.obsidian/plugins/obsidian-icon-folder/data.json'
+   */
+  configFilePath?: string;
+  /**
+   * Automatically inherit each folder note icon from its parent folder.
+   * @default false
+   */
+  inheritFolderNoteIconEnabled?: boolean;
+  /**
+   * Bidirectionally sync folder <-> folder note icon records in data.json.
+   * @default false
+   */
+  bidirectionalFolderNoteIconSyncEnabled?: boolean;
+  /**
+   * Filename (without extension) of folder notes. Empty means use the folder's own name.
+   * @default ''
+   */
+  folderNoteName?: string;
+  /**
+   * Installed plugin id used to import the folder note name.
+   * @default ''
+   */
+  folderNotePluginId?: string;
+  // ===== END PATCH =====
 }
 
 export const DEFAULT_SETTINGS: IconFolderSettings = {
@@ -216,4 +243,11 @@ export const DEFAULT_SETTINGS: IconFolderSettings = {
   lucideIconPackType: 'native',
   debugMode: false,
   useInternalPlugins: false,
+  // ===== PATCHED: 自定义配置文件目录 + Folder note 图标继承 / 双向同步 =====
+  configFilePath: '.obsidian/plugins/obsidian-icon-folder/data.json',
+  inheritFolderNoteIconEnabled: false,
+  bidirectionalFolderNoteIconSyncEnabled: false,
+  folderNoteName: '',
+  folderNotePluginId: '',
+  // ===== END PATCH =====
 };

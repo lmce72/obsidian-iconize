@@ -7,6 +7,10 @@ import ExtraMarginSetting from './extraMargin';
 import IconColorSetting from './iconColor';
 import IconFontSizeSetting from './iconFontSize';
 import IconPacksPathSetting from './iconPacksPath';
+// ===== PATCHED: 自定义配置路径 + Folder note 继承设置 =====
+import ConfigFilePathSetting from './configFilePath';
+import InheritFolderNoteIconSetting from './inheritFolderNoteIcon';
+// ===== END PATCH =====
 import IconPacksBackgroundChecker from './iconPacksBackgroundChecker';
 import PredefinedIconPacksSetting from './predefinedIconPacks';
 import RecentlyUsedIconsSetting from './recentlyUsedIcons';
@@ -35,6 +39,7 @@ export default class IconFolderSettings extends PluginSettingTab {
     containerEl.createEl('h1', { text: 'General' });
     new RecentlyUsedIconsSetting(plugin, containerEl).display();
     new IconPacksPathSetting(plugin, containerEl).display();
+    new ConfigFilePathSetting(plugin, containerEl).display();
     new IconPacksBackgroundChecker(plugin, containerEl).display();
     new EmojiStyleSetting(plugin, containerEl).display();
     new IconIdentifierSetting(plugin, containerEl).display();
@@ -44,6 +49,7 @@ export default class IconFolderSettings extends PluginSettingTab {
     containerEl.createEl('h3', { text: 'Visibility of icons' });
     new ToggleIconInTabs(plugin, containerEl).display();
     new ToggleIconInTitle(plugin, containerEl).display();
+    new InheritFolderNoteIconSetting(plugin, containerEl).display();
     new FrontmatterOptions(plugin, containerEl).display();
     new ToggleIconsInNotes(plugin, containerEl).display();
     new ToggleIconsInLinks(plugin, containerEl).display();

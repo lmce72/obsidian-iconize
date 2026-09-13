@@ -1,0 +1,10 @@
+# Build fix for this fork.
+#
+# Upstream pins `@codemirror/language` to a git tarball
+# (https://github.com/lishid/cm-language) which ships without a build step, so
+# pnpm refuses to prepare it and `pnpm install` fails outright. The override
+# resolves the same module from the npm registry instead.
+#
+# Remove this file only if upstream's pin starts installing cleanly.
+overrides:
+  '@codemirror/language': ^6.9.2

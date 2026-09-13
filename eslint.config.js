@@ -6,6 +6,11 @@ import eslintConfigPrettier from 'eslint-config-prettier';
 import globals from 'globals';
 
 export default defineConfig(
+  {
+    // `deprecated/` holds archived CommonJS reference implementations that are not
+    // part of the build, so they are not linted as source.
+    ignores: ['node_modules', 'dist', 'main.js', 'deprecated/**'],
+  },
   eslint.configs.recommended,
   tseslint.configs.recommended,
   eslintConfigPrettier,

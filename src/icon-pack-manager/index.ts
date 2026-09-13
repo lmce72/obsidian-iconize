@@ -8,6 +8,13 @@ import { readZipFile } from '@app/zip-util';
 import { logger } from '@app/lib/logger';
 import JSZip from 'jszip';
 import { generateIcon, getNormalizedName, nextIdentifier } from './util';
+import { getExtraPath } from '@app/icon-packs';
+import {
+  FolderSource,
+  ZipSource,
+  isReservedDirectory,
+} from '@app/lib/icon-sources';
+import type { IconSource } from '@app/lib/icon-sources';
 
 export interface Icon {
   name: string;
@@ -28,6 +35,15 @@ export class IconPackManager {
 
   private preloadedIcons: Icon[];
 
+  /**
+   * 与已安装图标包同名的解压目录。
+   * Unpacked directories that share a name with an installed archive.
+   *
+   * 归档通常是权威来源，但旧版本会按需把用到的图标解压到同名目录；只有当归档
+   * 一个图标都索引不到时（例如用户装的是与固定路径不同版本的预定义包），才回退到目录。
+   */
+  private shadowedFolders: Map<string, string>;
+
   constructor(
     private plugin: IconizePlugin,
     path: string,
@@ -38,32 +54,127 @@ export class IconPackManager {
     this.fileManager = new FileManager(plugin);
     this.iconPacks = [];
     this.preloadedIcons = [];
+    this.shadowedFolders = new Map();
   }
 
+  /**
+   * 发现已安装的图标包 / Discovers installed packs.
+   *
+   * 这里只建立图标包对象并挂上读取源，不解压任何内容。
+   * Only pack objects and their read sources are created here; nothing is unpacked.
+   */
   public async init(): Promise<void> {
+    this.iconPacks = [];
+    this.shadowedFolders = new Map();
+
+    if (!(await this.plugin.app.vault.adapter.exists(this.path))) {
+      await this.createDefaultDirectory();
+    }
+
     const loadedIconPacks = await this.plugin.app.vault.adapter.list(this.path);
+
+    // 归档即保持压缩的图标包。
     for (let i = 0; i < loadedIconPacks.files.length; i++) {
       const fileName = loadedIconPacks.files[i];
-      if (fileName.endsWith('.zip')) {
-        const iconPackName = fileName.split('/').pop().split('.zip')[0];
-        let iconPack = new IconPack(this.plugin, iconPackName, false);
-
-        if (iconPackName === LUCIDE_ICON_PACK_NAME) {
-          iconPack = this.lucideIconPack.init(iconPack);
-        }
-
-        this.iconPacks.push(iconPack);
-        logger.info(`Initialized icon pack '${iconPackName}'`);
+      if (!fileName.endsWith('.zip')) {
+        continue;
       }
+
+      const iconPackName = fileName.split('/').pop().split('.zip')[0];
+      let iconPack = new IconPack(
+        this.plugin,
+        iconPackName,
+        false,
+        new ZipSource(
+          this.plugin.app.vault.adapter,
+          fileName,
+          getExtraPath(iconPackName) ?? '',
+        ),
+        iconPackName === LUCIDE_ICON_PACK_NAME ? 'Li' : undefined,
+      );
+
+      if (iconPackName === LUCIDE_ICON_PACK_NAME) {
+        iconPack = this.lucideIconPack.init(iconPack);
+      }
+
+      this.iconPacks.push(iconPack);
+      logger.info(`Initialized icon pack '${iconPackName}'`);
+    }
+
+    // 目录是用户自建的图标包，或旧版本从归档里解压出来的图标。
+    for (let i = 0; i < loadedIconPacks.folders.length; i++) {
+      const folder = loadedIconPacks.folders[i];
+      const folderName = folder.split('/').pop();
+
+      // 插件自己生成的状态不是图标包。
+      if (isReservedDirectory(folderName)) {
+        continue;
+      }
+
+      // 同名归档已存在时暂缓，等归档证明自己确实有图标。
+      if (this.iconPacks.some((pack) => pack.getName() === folderName)) {
+        this.shadowedFolders.set(folderName, folder);
+        continue;
+      }
+
+      this.iconPacks.push(
+        new IconPack(
+          this.plugin,
+          folderName,
+          true,
+          new FolderSource(this.plugin.app.vault.adapter, folder),
+        ),
+      );
+      logger.info(`Initialized custom icon pack '${folderName}'`);
     }
 
     if (this.plugin.doesUseNativeLucideIconPack()) {
+      this.iconPacks = this.iconPacks.filter(
+        (pack) => pack.getName() !== LUCIDE_ICON_PACK_NAME,
+      );
       const iconPack = this.lucideIconPack.init();
-      this.iconPacks.push(iconPack);
+      if (iconPack) {
+        this.iconPacks.push(iconPack);
+      }
     }
   }
 
+  /**
+   * 与已安装图标包同名的解压目录 / Unpacked directories shadowed by an archive.
+   */
+  public getShadowedFolders(): Map<string, string> {
+    return this.shadowedFolders;
+  }
+
+  /**
+   * 为图标包挂上读取源 / Attaches a read source to a pack.
+   *
+   * 用于归档索引为空、需要回退到同名解压目录的场景。
+   */
+  public replacePackSource(name: string, source: IconSource): void {
+    const index = this.iconPacks.findIndex((pack) => pack.getName() === name);
+    if (index > -1) {
+      this.iconPacks.splice(index, 1);
+    }
+
+    const folder = this.shadowedFolders.get(name);
+    if (folder) {
+      this.iconPacks.push(new IconPack(this.plugin, name, true, source));
+      this.shadowedFolders.delete(name);
+    }
+  }
+
+  // [LEGACY] 旧方法：全量解压所有图标包到内存（约 2 秒 / 数千个图标），
+  // 已被按需加载取代 —— 索引在 init 阶段建立，图标由 IconResolver 按需解析。
+  // 保留为 no-op 以兼容既有调用点，日后可连同调用点一起移除。
   public async loadAll(): Promise<void> {
+    logger.info(
+      'loadAll() is a no-op: icon packs are index-backed and icons resolve on demand',
+    );
+  }
+
+  // [LEGACY] 旧的全量解压实现，保留仅供参考，日后可删除。
+  private async loadAllUnpacked(): Promise<void> {
     const loadedIconPacks = await this.plugin.app.vault.adapter.list(this.path);
 
     // Extract all zip files which will be downloaded icon packs.
@@ -149,7 +260,38 @@ export class IconPackManager {
     this.iconPacks.push(iconPack);
   }
 
+  // ===== PATCHED: 不再写外部 SVG 文件 / No external SVG files are written =====
+  /**
+   * 确保图标已进入缓存 / Ensures the icon is cached.
+   *
+   * 原实现把图标解压成 `.obsidian/icons/<pack>/<name>.svg` 外部文件。按需加载下
+   * 归档始终保持压缩，解析一次即写入磁盘缓存，因此这里只需触发一次解析。
+   *
+   * The original implementation extracted icons into loose `.svg` files. Under lazy
+   * loading archives stay compressed and resolving once writes the disk cache, so
+   * this only has to trigger a resolve.
+   */
   public async extractIcon(icon: Icon, iconContent: string): Promise<void> {
+    const iconId = `${icon.prefix}${icon.name}`;
+
+    const resolver = this.plugin.iconResolver;
+    if (resolver) {
+      await resolver.resolve(iconId);
+      return;
+    }
+
+    logger.info(
+      `Skipped external SVG write for ${iconId}; icon packs stay compressed`,
+    );
+    void iconContent;
+  }
+  // ===== END PATCH =====
+
+  // [LEGACY] 旧的解压到外部 SVG 文件实现，保留仅供参考，日后可删除。
+  private async extractIconToFile(
+    icon: Icon,
+    iconContent: string,
+  ): Promise<void> {
     const doesIconPackDirExist = await this.plugin.app.vault.adapter.exists(
       `${this.path}/${icon.iconPackName}`,
     );

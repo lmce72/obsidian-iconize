@@ -8,6 +8,7 @@ import {
 } from 'obsidian';
 import icon from '@app/lib/icon';
 import emoji from '@app/emoji';
+import dom from '@app/lib/util/dom';
 import { saveIconToIconPack } from '@app/util';
 import IconizePlugin from '@app/main';
 
@@ -87,19 +88,29 @@ export default class SuggestionIcon extends EditorSuggest<string> {
   }
 
   renderSuggestion(value: string, el: HTMLElement): void {
-    const iconObject = icon.getIconByName(this.plugin, value);
     el.style.display = 'flex';
     el.style.alignItems = 'center';
     el.style.gap = '0.25rem';
-    if (iconObject) {
-      // Suggest an icon.
-      el.innerHTML = `${iconObject.svgElement} <span>${value}</span>`;
-    } else {
-      // Suggest an emoji - display its shortcode version.
-      const shortcode = emoji.getShortcode(value);
-      if (shortcode) {
-        el.innerHTML = `<span>${value}</span> <span>${shortcode}</span>`;
-      }
+
+    // 图标可能在索引中但尚未解析（按需加载），此时交给 dom.setIconForNode 异步补齐。
+    // The icon may be indexed but not yet resolved; dom.setIconForNode fills it in.
+    if (
+      icon.getIconByName(this.plugin, value) ||
+      this.plugin.iconResolver?.find(value)
+    ) {
+      const iconEl = el.createSpan();
+      dom.setIconForNode(this.plugin, value, iconEl, {
+        shouldApplyAllStyles: false,
+      });
+      el.createSpan({ text: value });
+      return;
+    }
+
+    // Suggest an emoji - display its shortcode version.
+    el.createSpan({ text: value });
+    const shortcode = emoji.getShortcode(value);
+    if (shortcode) {
+      el.createSpan({ text: shortcode });
     }
   }
 

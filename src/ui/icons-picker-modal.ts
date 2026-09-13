@@ -4,10 +4,7 @@ import emoji from '@app/emoji';
 import { type Icon } from '@app/icon-pack-manager';
 import dom from '@app/lib/util/dom';
 import { saveIconToIconPack } from '@app/util';
-import {
-  getSvgFromLoadedIcon,
-  nextIdentifier,
-} from '@app/icon-pack-manager/util';
+import { nextIdentifier } from '@app/icon-pack-manager/util';
 
 export default class IconsPickerModal extends FuzzySuggestModal<any> {
   private plugin: IconizePlugin;
@@ -171,16 +168,33 @@ export default class IconsPickerModal extends FuzzySuggestModal<any> {
 
         el.innerHTML = `<div>${el.innerHTML}</div><div class="iconize-icon-preview">${displayName}</div>`;
       } else {
-        el.innerHTML = `<div>${
-          el.innerHTML
-        }</div><div class="iconize-icon-preview">${getSvgFromLoadedIcon(
-          this.plugin,
-          item.item.prefix,
-          item.item.name,
-        )}</div>`;
+        // 预览图标按需解析：浏览大图标包会触及成千上万个图标，只应为真正渲染出来的那些付出代价。
+        // Previews resolve on demand; only the icons actually rendered are paid for.
+        this.renderPreview(el, `${item.item.prefix}${item.item.name}`);
       }
     }
 
     this.renderIndex++;
+  }
+
+  /**
+   * 为一条建议渲染图标预览 / Renders the icon preview for one suggestion.
+   *
+   * 包一层容器而不是直接写 innerHTML，这样图标走的是插件统一的图标应用逻辑，
+   * 内存未命中时会自动按需解析（见 dom.setIconForNode）。
+   */
+  private renderPreview(el: HTMLElement, iconNameWithPrefix: string): void {
+    const labelEl = createDiv();
+    while (el.firstChild) {
+      labelEl.appendChild(el.firstChild);
+    }
+
+    const previewEl = createDiv({ cls: 'iconize-icon-preview' });
+    el.appendChild(labelEl);
+    el.appendChild(previewEl);
+
+    dom.setIconForNode(this.plugin, iconNameWithPrefix, previewEl, {
+      shouldApplyAllStyles: false,
+    });
   }
 }
