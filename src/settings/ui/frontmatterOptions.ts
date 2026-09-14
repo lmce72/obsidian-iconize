@@ -80,7 +80,7 @@ export default class FrontmatterOptions extends IconFolderSetting {
     new Setting(this.containerEl)
       .setName('Refresh icons from frontmatter')
       .setDesc(
-        'Sets the icon and color for each note in the vault based on the frontmatter properties. WARNING: This will change any manually set icons to the one defined in the frontmatter. IF A NOTE HAS NO FRONTMATTER, THE CURRENT ICON WILL BE REMOVED. Please restart Obsidian after this completes to see the changes.',
+        'Sets the icon and color for each note in the vault based on the frontmatter properties. WARNING: This will change any manually set icons to the one defined in the frontmatter. Notes without an `icon` property are left untouched. Please restart Obsidian after this completes to see the changes.',
       )
       .addButton((btn) => {
         btn.setButtonText('Refresh').onClick(async () => {
@@ -109,7 +109,19 @@ export default class FrontmatterOptions extends IconFolderSetting {
             let iconColor = fileCache.frontmatter?.[frontmatterIconColorKey];
 
             if (!iconName) {
-              await this.plugin.removeFolderIcon(file.path);
+              // 跳过没有 `icon` frontmatter 的文件，而不是删掉它们的图标配置。
+              //
+              // 这个按钮名叫「Refresh」：它应当把 frontmatter 里写的图标同步过来，
+              // 而不是把没写 frontmatter 的文件的图标清空。原先的删除行为会波及仓库里
+              // 绝大多数笔记——它们本来就不使用 frontmatter 图标。而「用户清空了某篇
+              // 笔记的 icon 属性」这一场景，已由 metadataCache 的实时监听处理。
+              //
+              // Skip files without an `icon` frontmatter property rather than deleting their
+              // icon config. The button is named "Refresh": it should bring the icons
+              // written in frontmatter across, not clear the icons of files that never used
+              // frontmatter — which is most of a vault. The case it was covering, a note
+              // whose `icon` property was cleared, is already handled by the live
+              // metadataCache listener.
               continue;
             }
 

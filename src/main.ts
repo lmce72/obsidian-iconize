@@ -1079,6 +1079,18 @@ export default class IconizePlugin extends Plugin {
       return;
     }
 
+    // 删掉一条图标配置是不可逆的，而触发它的路径有多条（右键菜单、文件删除、
+    // frontmatter 监听、设置项）。调试模式下记录调用栈，出问题时可以直接定位来源。
+    //
+    // Removing an icon config is irreversible and several paths reach here (the context
+    // menu, a file deletion, the frontmatter listener, a settings action). Logging the stack
+    // in debug mode makes the source identifiable when something goes wrong.
+    if (this.getSettings().debugMode) {
+      logger.warn(
+        `Removing icon config for '${path}'\n${new Error('stack').stack ?? ''}`,
+      );
+    }
+
     // Saves the icon name with prefix to remove it from the icon pack directory later.
     const iconData = this.data[path];
 
@@ -1380,6 +1392,24 @@ export default class IconizePlugin extends Plugin {
       const dirExists = await this.app.vault.adapter.exists(dir);
       if (!dirExists) {
         await this.app.vault.adapter.mkdir(dir);
+      }
+
+      // 写前留一代备份：配置里是用户逐条设置的图标，一旦被误操作清空就无法凭记忆还原。
+      // 只保留一代，因此不会无限堆积。
+      //
+      // Keep one generation of backup: the config holds icons the user set one by one, and a
+      // mistaken action that clears them cannot be reconstructed from memory. Only one
+      // generation is kept, so it cannot pile up.
+      const backupPath = `${configPath}.bak`;
+      try {
+        if (await this.app.vault.adapter.exists(configPath)) {
+          await this.app.vault.adapter.copy(configPath, backupPath);
+        }
+      } catch (error) {
+        console.warn(
+          `[${config.PLUGIN_NAME}] Could not back up the config before writing:`,
+          error,
+        );
       }
 
       // 先写临时文件再改名：同步过程或其它进程可能恰好读到写入中途的文件，
