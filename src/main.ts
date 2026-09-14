@@ -128,6 +128,13 @@ export default class IconizePlugin extends Plugin {
    */
   private titleIconRequest = new WeakMap<HTMLElement, number>();
   private titleIconRequestSeq = 0;
+  /**
+   * 上次写入配置的内容 / Content of the last config write.
+   *
+   * 用来跳过无变化的写入，避免让同步客户端反复上传同一个文件。
+   * Used to skip no-op writes, so a sync client is not asked to re-upload an unchanged file.
+   */
+  private _lastSavedConfig: string | null = null;
   // ===== END PATCH =====
 
   public getUsedIcons(): Set<string> {
@@ -284,6 +291,39 @@ export default class IconizePlugin extends Plugin {
         this.openIconPicker(file.path);
       },
     });
+
+    // ===== PATCHED: 标题图标诊断 / Title icon diagnostics =====
+    /**
+     * 把标题图标的实况写进仓库，随同步回传到桌面。
+     * Writes what the title icon actually looks like into the vault, so it syncs back to a
+     * machine where it can be read.
+     *
+     * 移动端没有开发者工具，而标题图标的问题只在那一边复现，因此让设备自己把现场记下来
+     * 是唯一能拿到实证的办法。
+     *
+     * Mobile has no developer tools and the problem only reproduces there, so having the
+     * device record the scene is the only way to get evidence.
+     */
+    this.addCommand({
+      id: 'iconize:diagnose-title-icon',
+      name: 'Diagnose title icon',
+      callback: async () => {
+        const report = await this.collectTitleIconDiagnostics();
+        const path = `${this.getConfigPath()}.title-icon-diagnostic.json`;
+
+        try {
+          await this.app.vault.adapter.write(
+            path,
+            JSON.stringify(report, null, 2),
+          );
+          new Notice(`[${config.PLUGIN_NAME}] Diagnostic written to ${path}`);
+        } catch (error) {
+          console.error('[Iconize] Could not write the diagnostic:', error);
+          new Notice(`[${config.PLUGIN_NAME}] Diagnostic failed: ${error}`);
+        }
+      },
+    });
+    // ===== END PATCH =====
 
     this.registerEvent(
       // Registering file menu event for listening to file pinning and unpinning.
@@ -484,6 +524,124 @@ export default class IconizePlugin extends Plugin {
       if (this.getSettings().iconInTitleEnabled) {
         this.addIconInTitle(iconName);
       }
+    };
+  }
+  // ===== END PATCH =====
+
+  // ===== PATCHED: 标题图标诊断 / Title icon diagnostics =====
+  /**
+   * 收集标题图标的现场信息 / Collects what the title icon looks like right now.
+   */
+  private async collectTitleIconDiagnostics(): Promise<
+    Record<string, unknown>
+  > {
+    const describe = (el: Element | null): Record<string, unknown> | null => {
+      if (!el) {
+        return null;
+      }
+      const style = getComputedStyle(el as HTMLElement);
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      return {
+        tag: el.tagName,
+        cls: el.className,
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        top: Math.round(rect.top),
+        left: Math.round(rect.left),
+        childCount: el.childElementCount,
+        inlineDisplay: (el as HTMLElement).style.display,
+        inlineWidth: (el as HTMLElement).style.width,
+      };
+    };
+
+    const bodyStyle = getComputedStyle(document.body);
+
+    // 强制走一次标题图标的完整链路，并记录事后状态——这样报告本身就能回答
+    // 「机制到底能不能工作」，而不是只描述现状。
+    // Force the whole title-icon path once and record the outcome, so the report answers
+    // whether the mechanism works rather than only describing the status quo.
+    const before = this.app.workspace.getLeavesOfType('markdown').length;
+    for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+      const file = leaf.view.file;
+      const iconName = file ? this.getIconNameFromPath(file.path) : undefined;
+      if (file && iconName) {
+        this.applyTitleIcon(
+          (leaf.view as InlineTitleView).inlineTitleEl,
+          iconName,
+          file.path,
+        );
+      }
+    }
+    void before;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    return {
+      at: new Date().toISOString(),
+      platform: {
+        bodyClasses: document.body.className,
+        isMobile: document.body.classList.contains('is-mobile'),
+        isTablet: document.body.classList.contains('is-tablet'),
+        isPhone: document.body.classList.contains('is-phone'),
+        isAndroid: document.body.classList.contains('is-android'),
+        isIos: document.body.classList.contains('is-ios'),
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+      },
+      settings: {
+        iconInTitleEnabled: this.getSettings().iconInTitleEnabled,
+        iconInTitlePosition: this.getSettings().iconInTitlePosition,
+      },
+      cssVariables: {
+        lineWidth: bodyStyle.getPropertyValue('--line-width'),
+        maxWidth: bodyStyle.getPropertyValue('--max-width'),
+        contentMargin: bodyStyle.getPropertyValue('--content-margin'),
+        inlineTitleSize: bodyStyle.getPropertyValue('--inline-title-size'),
+      },
+      // 配置到底读到了什么：区分「配置没同步过来」与「这个文件恰好没配图标」。
+      // What the config actually holds: tells "the config has not synced" apart from "this
+      // particular file has no icon".
+      config: {
+        path: this.getConfigPath(),
+        entryCount: Object.keys(this.data).length,
+        iconEntryCount: Object.entries(this.data).filter(
+          ([key, value]) => key !== 'settings' && Boolean(value),
+        ).length,
+        loadState: this.configLoadState,
+        sample: Object.entries(this.data)
+          .filter(([key]) => key !== 'settings')
+          .slice(0, 5)
+          .map(([key, value]) => ({
+            key,
+            value: typeof value === 'object' ? value : String(value),
+          })),
+      },
+      leaves: this.app.workspace.getLeavesOfType('markdown').map((leaf) => {
+        const view = leaf.view as InlineTitleView;
+        const inlineTitleEl = view.inlineTitleEl ?? null;
+        const parent = inlineTitleEl?.parentElement ?? null;
+        const titleIcon = parent
+          ? parent.querySelector(`.${config.TITLE_ICON_CLASS}`)
+          : null;
+
+        return {
+          file: leaf.view.file?.path ?? null,
+          iconName: leaf.view.file
+            ? (this.getIconNameFromPath(leaf.view.file.path) ?? null)
+            : null,
+          inlineTitleExists: !!inlineTitleEl,
+          inlineTitle: describe(inlineTitleEl),
+          parent: describe(parent),
+          wrapper: describe(
+            parent?.querySelector('.iconize-inline-title-wrapper') ?? null,
+          ),
+          titleIcon: describe(titleIcon),
+          titleIconSvg:
+            titleIcon?.querySelector('svg')?.outerHTML.slice(0, 200) ?? null,
+        };
+      }),
     };
   }
   // ===== END PATCH =====
@@ -1359,6 +1517,7 @@ export default class IconizePlugin extends Plugin {
         string,
         string | boolean | IconFolderSettings | FolderIconObject
       >;
+      this._lastSavedConfig = JSON.stringify(this.data, null, 2);
     } catch (error) {
       console.error(
         '[iconize] Failed to load config from',
@@ -1407,6 +1566,18 @@ export default class IconizePlugin extends Plugin {
     this._savePending = true;
     try {
       const configPath = this.getConfigPath();
+
+      // 内容没变就不写。图标相关的事件很密集，而每一次写都会让同步客户端重新上传，
+      // 在同步仓库里这才是冲突与延迟的主要来源。
+      //
+      // Skip the write when nothing changed. Icon events are frequent, and every write makes
+      // a sync client re-upload the file — which is what actually causes conflicts and lag in
+      // a synced vault.
+      const serialized = JSON.stringify(this.data, null, 2);
+      if (serialized === this._lastSavedConfig) {
+        return;
+      }
+
       const dir = configPath.substring(0, configPath.lastIndexOf('/'));
       const dirExists = await this.app.vault.adapter.exists(dir);
       if (!dirExists) {
@@ -1437,10 +1608,8 @@ export default class IconizePlugin extends Plugin {
       // Write to a temporary file and rename: a sync pass or another process can read the
       // file mid-write, and a rename is atomic, so readers only ever see complete content.
       const tmpPath = `${configPath}.tmp`;
-      await this.app.vault.adapter.write(
-        tmpPath,
-        JSON.stringify(this.data, null, 2),
-      );
+      await this.app.vault.adapter.write(tmpPath, serialized);
+      this._lastSavedConfig = serialized;
       try {
         await this.app.vault.adapter.rename(tmpPath, configPath);
       } catch (renameError) {
@@ -1450,10 +1619,8 @@ export default class IconizePlugin extends Plugin {
           '[iconize] Atomic rename unsupported, writing the config directly:',
           renameError,
         );
-        await this.app.vault.adapter.write(
-          configPath,
-          JSON.stringify(this.data, null, 2),
-        );
+        await this.app.vault.adapter.write(configPath, serialized);
+        this._lastSavedConfig = serialized;
         try {
           await this.app.vault.adapter.remove(tmpPath);
         } catch {
