@@ -27,6 +27,23 @@ interface Options {
    * tell whether it still applies.
    */
   iconName?: string;
+  /**
+   * 该标题图标对应的文件路径 / Path of the file this title icon belongs to.
+   *
+   * 点击时由此得知要更改哪个文件的图标；元素会被复用，因此每次都要更新。
+   * Tells a click which file's icon to change; the element is reused, so it is refreshed on
+   * every call.
+   */
+  path?: string;
+  /**
+   * 点击标题图标时调用，参数是该元素当前代表的路径。
+   * Invoked when the title icon is clicked, with the path the element currently stands for.
+   *
+   * 以回调而非在此直接打开选择器：那会让本模块依赖 UI 层，并与 main 形成循环引用。
+   * A callback rather than opening the picker here: that would make this module depend on
+   * the UI layer and form a cycle with main.
+   */
+  onClick?: (path: string) => void;
 }
 
 const add = (
@@ -67,6 +84,35 @@ const add = (
   // results against, and an empty attribute would be noise.
   if (options?.iconName) {
     titleIcon.setAttribute(config.ICON_ATTRIBUTE_NAME, options.iconName);
+  }
+
+  // 让标题图标可点击以更改图标。/ Make the title icon clickable to change the icon.
+  //
+  // 元素会被复用（切换文件时不重建），因此只绑定一次监听，并每次刷新它读取的路径——
+  // 否则重复绑定会让监听器叠加，或让点击作用到上一个文件。
+  //
+  // The element is reused across files, so the listener is bound once and the path it reads
+  // is refreshed on each call; binding again would stack listeners, and a captured path
+  // would point at the previous file.
+  if (options?.path) {
+    titleIcon.dataset.iconizePath = options.path;
+  }
+  if (options?.onClick) {
+    titleIcon.style.cursor = 'pointer';
+    if (titleIcon.dataset.iconizeClickBound !== '1') {
+      titleIcon.dataset.iconizeClickBound = '1';
+      titleIcon.addEventListener('click', (event) => {
+        // 阻止冒泡，避免点击被内联标题或编辑器接走（那会把光标移进标题）。
+        // Stop propagation so the inline title or editor does not take the click and move
+        // the caret into the title.
+        event.preventDefault();
+        event.stopPropagation();
+        const path = titleIcon.dataset.iconizePath;
+        if (path) {
+          options.onClick?.(path);
+        }
+      });
+    }
   }
   // Checks if the passed element is an emoji.
   if (emoji.isEmoji(svgElement) && options.fontSize) {

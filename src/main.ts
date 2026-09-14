@@ -272,27 +272,7 @@ export default class IconizePlugin extends Plugin {
           return;
         }
 
-        const modal = new IconsPickerModal(this.app, this, file.path);
-        modal.open();
-
-        modal.onSelect = (iconName: string): void => {
-          IconCache.getInstance().set(file.path, {
-            iconNameWithPrefix: iconName,
-          });
-
-          // Update icon in tab when setting is enabled.
-          if (this.getSettings().iconInTabsEnabled) {
-            const tabLeaves = iconTabs.getTabLeavesOfFilePath(this, file.path);
-            for (const tabLeaf of tabLeaves) {
-              iconTabs.update(this, iconName, tabLeaf.tabHeaderInnerIconEl);
-            }
-          }
-
-          // Update icon in title when setting is enabled.
-          if (this.getSettings().iconInTitleEnabled) {
-            this.addIconInTitle(iconName);
-          }
-        };
+        this.openIconPicker(file.path);
       },
     });
 
@@ -336,30 +316,7 @@ export default class IconizePlugin extends Plugin {
           item.setTitle('Change icon');
           item.setIcon('hashtag');
           item.onClick(() => {
-            const modal = new IconsPickerModal(this.app, this, file.path);
-            modal.open();
-
-            modal.onSelect = (iconName: string): void => {
-              IconCache.getInstance().set(file.path, {
-                iconNameWithPrefix: iconName,
-              });
-
-              // Update icon in tab when setting is enabled.
-              if (this.getSettings().iconInTabsEnabled) {
-                const tabLeaves = iconTabs.getTabLeavesOfFilePath(
-                  this,
-                  file.path,
-                );
-                for (const tabLeaf of tabLeaves) {
-                  iconTabs.update(this, iconName, tabLeaf.tabHeaderInnerIconEl);
-                }
-              }
-
-              // Update icon in title when setting is enabled.
-              if (this.getSettings().iconInTitleEnabled) {
-                this.addIconInTitle(iconName);
-              }
-            };
+            this.openIconPicker(file.path);
           });
         };
 
@@ -486,6 +443,39 @@ export default class IconizePlugin extends Plugin {
     this.iconResolver = system.resolver;
     this.inlineIconLoader = system.loader;
     this.eventEmitter.emit('allIconsLoaded');
+  }
+  // ===== END PATCH =====
+
+  // ===== PATCHED: 图标选择器入口 / Entry point for the icon picker =====
+  /**
+   * 为指定路径打开图标选择器 / Opens the icon picker for a path.
+   *
+   * 命令、右键菜单与点击标题图标都走这里，避免同一段「打开 + 选中后更新标签页与标题」
+   * 的逻辑散落三份。
+   *
+   * The command, the context menu and a click on the title icon all come through here, so
+   * the "open, then update tabs and title on select" logic exists once.
+   */
+  public openIconPicker(path: string): void {
+    const modal = new IconsPickerModal(this.app, this, path);
+    modal.open();
+
+    modal.onSelect = (iconName: string): void => {
+      IconCache.getInstance().set(path, { iconNameWithPrefix: iconName });
+
+      // Update icon in tab when setting is enabled.
+      if (this.getSettings().iconInTabsEnabled) {
+        const tabLeaves = iconTabs.getTabLeavesOfFilePath(this, path);
+        for (const tabLeaf of tabLeaves) {
+          iconTabs.update(this, iconName, tabLeaf.tabHeaderInnerIconEl);
+        }
+      }
+
+      // Update icon in title when setting is enabled.
+      if (this.getSettings().iconInTitleEnabled) {
+        this.addIconInTitle(iconName);
+      }
+    };
   }
   // ===== END PATCH =====
 
@@ -912,6 +902,10 @@ export default class IconizePlugin extends Plugin {
         fontSize: calculateInlineTitleSize(),
         color,
         iconName: iconNameWithPrefix,
+        // 点击标题图标即可更改它的图标。
+        // Clicking the title icon changes its icon.
+        path,
+        onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
       });
       return;
     }
@@ -923,6 +917,10 @@ export default class IconizePlugin extends Plugin {
         fontSize: calculateInlineTitleSize(),
         color,
         iconName: iconNameWithPrefix,
+        // 点击标题图标即可更改它的图标。
+        // Clicking the title icon changes its icon.
+        path,
+        onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
       });
       return;
     }
@@ -951,6 +949,10 @@ export default class IconizePlugin extends Plugin {
             fontSize: calculateInlineTitleSize(),
             color,
             iconName: iconNameWithPrefix,
+            // 点击标题图标即可更改它的图标。
+            // Clicking the title icon changes its icon.
+            path,
+            onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
           });
         })
         .catch((error) =>
