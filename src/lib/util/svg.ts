@@ -55,6 +55,13 @@ const extract = (svgString: string): string => {
  * @returns Modified SVG string.
  */
 const setFontSize = (svgString: string, fontSize: number): string => {
+  // 非有限值会写出 `width="NaNpx"`，图标随之完全不可见。与其静默坏掉，不如原样返回。
+  // A non-finite value would write `width="NaNpx"`, leaving the icon invisible; returning the
+  // markup untouched is the safer failure.
+  if (!Number.isFinite(fontSize) || fontSize <= 0) {
+    return svgString;
+  }
+
   const widthRe = new RegExp(/width="[\d.]+(px)?"/);
   const heightRe = new RegExp(/height="[\d.]+(px)?"/);
   if (svgString.match(widthRe)) {

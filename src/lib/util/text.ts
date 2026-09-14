@@ -2,6 +2,11 @@
 let cachedFontSize: number | null = null;
 let fontSizeCacheTime: number = 0;
 
+/** 无法读出字号时的兜底值 / Fallback when a font size cannot be read. */
+const DEFAULT_FONT_SIZE = 16;
+/** 内联标题相对正文字号的默认倍数 / Default inline-title scale relative to body text. */
+const DEFAULT_INLINE_TITLE_SCALE = 1.5;
+
 const calculateFontTextSize = () => {
   // get cached font size if available
   const now = Date.now();
@@ -14,6 +19,11 @@ const calculateFontTextSize = () => {
   );
   if (!fontSize) {
     fontSize = parseFloat(getComputedStyle(document.documentElement).fontSize);
+  }
+  // 两处都读不出来时给出兜底：NaN 会一路传到 setFontSize，把宽高写成 NaNpx。
+  // Fall back when neither can be read: NaN travels into setFontSize and writes NaNpx.
+  if (!Number.isFinite(fontSize) || fontSize <= 0) {
+    fontSize = DEFAULT_FONT_SIZE;
   }
   // set font size cache
   cachedFontSize = fontSize;
@@ -28,11 +38,25 @@ const calculateInlineTitleSize = (): number => {
   );
   const unit = inlineTitleSizeValue.replace(/[\d.]/g, '');
   let inlineTitleSize = parseFloat(inlineTitleSizeValue);
+
+  // `--inline-title-size` 并非在所有平台与主题下都存在。缺失时 `parseFloat('')` 得到 NaN，
+  // 而它的唯一用途就是标题图标的字号——于是图标的宽高会被写成 `NaNpx`，标题上方看起来
+  // 什么都没有，其它图标却完全正常。这里给出兜底倍数。
+  //
+  // The variable does not exist on every platform and theme. When it is missing,
+  // `parseFloat('')` is NaN, and its only consumer is the title icon — so the icon's
+  // width/height become `NaNpx` and nothing appears above the title while every other icon
+  // is fine. Fall back to a sensible scale.
+  if (!Number.isFinite(inlineTitleSize) || inlineTitleSize <= 0) {
+    inlineTitleSize = DEFAULT_INLINE_TITLE_SCALE;
+  }
+
   if (unit === 'px') {
     inlineTitleSize /= 16;
   }
 
-  return fontSize * inlineTitleSize;
+  const size = fontSize * inlineTitleSize;
+  return Number.isFinite(size) && size > 0 ? size : DEFAULT_FONT_SIZE;
 };
 
 // Type is being used for the HTML header tags.
