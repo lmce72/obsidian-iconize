@@ -131,23 +131,32 @@ export class IconResolver {
     const persist = options.persist ?? true;
 
     try {
-      const memoized = this.peek(iconId);
-      if (memoized) {
-        // 之前只作为预览解析过的图标，现在真正被使用，提升并写盘。
-        if (persist && !this.memoryCache.has(iconId)) {
-          this.remember(iconId, memoized, true);
-          await this.saveToDiskCache(iconId, memoized);
-        }
-        return memoized;
-      }
-
       const located = this.find(iconId);
       if (!located) {
         return null;
       }
 
+      // 磁盘缓存一律以条目 id 为键，而不是调用方传进来的字符串。
+      // 同一个图标可能以裸名（`home`）、大小写变体（`lihome`）等不同形式被查找，
+      // 用查询串做键会为同一个图标写出多份文件，且无法逐条失效。
+      //
+      // The disk cache is always keyed by the entry id rather than the caller's string:
+      // the same icon is looked up as a bare name or in another case, and keying on the
+      // query would write several files for one icon with no way to invalidate them.
+      const cacheKey = located.entry.id;
+
+      const memoized = this.peek(iconId);
+      if (memoized) {
+        // 之前只作为预览解析过的图标，现在真正被使用，提升并写盘。
+        if (persist && !this.memoryCache.has(iconId)) {
+          this.remember(iconId, memoized, true);
+          await this.saveToDiskCache(cacheKey, memoized);
+        }
+        return memoized;
+      }
+
       // Layer 2: 磁盘缓存。
-      const cached = await this.loadFromDiskCache(iconId);
+      const cached = await this.loadFromDiskCache(cacheKey);
       if (cached) {
         this.remember(iconId, cached, persist);
         return cached;
@@ -174,7 +183,7 @@ export class IconResolver {
 
       this.remember(iconId, icon, persist);
       if (persist) {
-        await this.saveToDiskCache(iconId, icon);
+        await this.saveToDiskCache(cacheKey, icon);
       }
 
       return icon;

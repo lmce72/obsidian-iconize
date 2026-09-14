@@ -202,6 +202,15 @@ async function loadPackIndex(
     } else {
       index = await buildIndex(name, pack.getPrefix(), source);
       await store.save(name, index);
+
+      // 索引重建说明源已经变过（换了归档、加了图标），此前缓存的图标标记因此不再可信，
+      // 必须一并作废——否则同一批图标 id 会继续从磁盘缓存返回旧图案。
+      //
+      // A rebuilt index means the source changed, so previously cached markup can no
+      // longer be trusted; without this, the same icon ids keep serving the old artwork
+      // from the disk cache.
+      await resolver.removePackCache(name);
+
       logger.info(
         `Indexed icon pack '${name}' (${index.entries.length} icons)`,
       );
