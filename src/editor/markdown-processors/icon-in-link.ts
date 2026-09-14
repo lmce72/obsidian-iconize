@@ -38,7 +38,12 @@ export const processIconInLinkMarkdown = (
       ctx.sourcePath,
     );
     if (!file) {
-      logger.warn('Link element does not have a linkpath to a file');
+      // 链接无法解析到文件是正常状态：要么指向不存在的文件（未解析链接），要么是外部地址。
+      // 两种情况都没有图标可加，无需告警——此处过去会为每个未解析链接输出一条 WARN。
+      //
+      // A link that resolves to no file is normal: either it points at a missing file or
+      // it is an external address. Neither has an icon to add, so this stays silent; it
+      // used to emit a WARN for every unresolved link.
       return;
     }
 
@@ -78,8 +83,14 @@ export const processIconInLinkMarkdown = (
       rootSpan.style.transform = 'translateY(0)';
       rootSpan.innerHTML = parsedEmoji;
     } else {
-      let svgEl = icon.getIconByName(plugin, iconName).svgElement;
-      svgEl = svg.setFontSize(svgEl, fontSize);
+      // `getIconByName` 在只拿到元数据（索引包尚未解析）时返回 null，这里必须容忍，
+      // 否则会抛 TypeError 中断整个后处理器。
+      // `getIconByName` returns null for metadata-only entries, which must be tolerated
+      // or the whole post-processor throws.
+      const svgEl = svg.setFontSize(
+        icon.getIconByName(plugin, iconName)?.svgElement ?? '',
+        fontSize,
+      );
       if (svgEl) {
         rootSpan.style.transform = 'translateY(20%)';
         rootSpan.innerHTML = svgEl;
