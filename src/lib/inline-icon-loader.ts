@@ -7,6 +7,7 @@
  */
 
 import IconizePlugin from '@app/main';
+import svg from './util/svg';
 
 export class InlineIconLoader {
   private plugin: IconizePlugin;
@@ -26,6 +27,21 @@ export class InlineIconLoader {
   // 批处理延迟（毫秒）/ Batch delay in milliseconds.
   private batchDelayMs: number;
 
+  /**
+   * 等待填充的元素：图标 id → 引用它的那些节点。
+   * Elements awaiting markup: icon id to the nodes referencing it.
+   *
+   * 用于「链接悬停预览」这类**不是 markdown leaf 的容器**：它们不会被 `repaintOpenNotes`
+   * 重绘，所以短代码一旦留在原地就永远是文字。改为先放好占位节点、解析完成后直接填进去，
+   * 浮层无需重绘也能显示图标。
+   *
+   * This covers containers that are *not* markdown leaves, such as the page-preview
+   * popover: `repaintOpenNotes` never touches them, so a shortcode left in place would stay
+   * literal text forever. Placing a placeholder node up front and filling it once the icon
+   * resolves makes the popover show the icon without needing a repaint.
+   */
+  private pendingElements: Map<string, Set<HTMLElement>>;
+
   constructor(plugin: IconizePlugin) {
     this.plugin = plugin;
     this.pending = new Set();
@@ -33,6 +49,80 @@ export class InlineIconLoader {
     this.timer = null;
     this.inFlight = false;
     this.batchDelayMs = 60;
+    this.pendingElements = new Map();
+  }
+
+  /**
+   * 把一个占位节点登记为「解析完成后填进去」。
+   * Registers a placeholder node to be filled once its icon resolves.
+   *
+   * 与 `requestIcon` 的区别：`requestIcon` 只负责把图标取进内存，之后依赖调用方重绘；
+   * 这里的节点是**已经替换掉短代码**的占位元素，需要被直接写入标记。
+   *
+   * Unlike `requestIcon`, which only brings the icon into memory and relies on the caller to
+   * repaint, the node here has already replaced the shortcode and needs the markup written
+   * into it directly.
+   */
+  fillElement(element: HTMLElement, iconId: string): void {
+    const resolver = this.plugin.iconResolver;
+    if (!resolver || !iconId) {
+      return;
+    }
+
+    const cached = resolver.peek(iconId);
+    if (cached) {
+      this.renderInto(element, cached.svgElement);
+      return;
+    }
+
+    // 只有确实存在于索引中的图标才值得等待。
+    if (!resolver.find(iconId)) {
+      return;
+    }
+
+    let elements = this.pendingElements.get(iconId);
+    if (!elements) {
+      elements = new Set();
+      this.pendingElements.set(iconId, elements);
+    }
+    elements.add(element);
+
+    this.pending.add(iconId);
+    this.schedule();
+  }
+
+  /**
+   * 把标记写入节点，字号对齐其父元素。
+   * Writes markup into a node, sized to match its parent.
+   */
+  private renderInto(element: HTMLElement, markup: string): void {
+    const parent = element.parentElement;
+    const parentFontSize = parent
+      ? parseFloat(getComputedStyle(parent).fontSize)
+      : NaN;
+
+    element.innerHTML = Number.isNaN(parentFontSize)
+      ? markup
+      : svg.setFontSize(markup, parentFontSize);
+  }
+
+  /**
+   * 填充等待该图标的全部节点 / Fills every node waiting on this icon.
+   */
+  private flushPendingElements(iconId: string, markup: string): void {
+    const elements = this.pendingElements.get(iconId);
+    if (!elements) {
+      return;
+    }
+    this.pendingElements.delete(iconId);
+
+    for (const element of elements) {
+      // 浮层可能已经关闭，节点已从文档移除。
+      // The popover may have closed, taking the node out of the document.
+      if (element.isConnected) {
+        this.renderInto(element, markup);
+      }
+    }
   }
 
   /**
@@ -112,6 +202,9 @@ export class InlineIconLoader {
 
           if (icon) {
             loaded++;
+            // 立刻填进等待它的节点，这份标记不依赖重绘。
+            // Fill the nodes waiting on it right away; this does not rely on a repaint.
+            this.flushPendingElements(iconId, icon.svgElement);
           } else {
             this.failed.add(iconId);
             console.warn(`[InlineIconLoader] Icon not found: ${iconId}`);
@@ -200,6 +293,7 @@ export class InlineIconLoader {
   reset(): void {
     this.pending.clear();
     this.failed.clear();
+    this.pendingElements.clear();
     // 不清 `inFlight` 会让加载器重置后永久拒绝调度新批次。
     // Leaving `inFlight` set makes the loader refuse to schedule any further batch.
     this.inFlight = false;

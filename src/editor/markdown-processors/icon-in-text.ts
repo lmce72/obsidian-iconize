@@ -99,55 +99,66 @@ export const processIconInTextMarkdown = (
     );
 
     const iconObject = icon.getIconByName(plugin, iconName);
-    if (iconObject) {
-      const toReplace = text.splitText(code.index);
-      const rootSpan = createSpan({
-        cls: 'cm-iconize-icon',
-        attr: {
-          'aria-label': iconName,
-          'data-icon': iconName,
-          'aria-hidden': 'true',
-        },
-      });
-      rootSpan.style.display = 'inline-flex';
-      rootSpan.style.transform = 'translateY(13%)';
 
-      const parentElement = toReplace.parentElement;
-      const tagName = parentElement?.tagName?.toLowerCase() ?? '';
-      let fontSize = calculateFontTextSize();
-
-      if (isHeader(tagName)) {
-        fontSize = calculateHeaderSize(tagName as HTMLHeader);
-        const svgElement = svg.setFontSize(iconObject.svgElement, fontSize);
-        rootSpan.innerHTML = svgElement;
-      } else {
-        const svgElement = svg.setFontSize(iconObject.svgElement, fontSize);
-        rootSpan.innerHTML = svgElement;
-      }
-
-      parentElement?.insertBefore(rootSpan, toReplace);
-      toReplace.textContent = toReplace.wholeText.substring(code.text.length);
-
-      // Set the font size to its parent font size if defined.
-      // We do this after that to not freeze the insertion while iterating over the tree.
-      // We are also updating the size after the animation because the styling won't be set
-      // in the first place.
-      requestAnimationFrame(() => {
-        const parentFontSize = parseFloat(
-          getComputedStyle(parentElement).fontSize,
-        );
-        if (!isNaN(parentFontSize)) {
-          rootSpan.innerHTML = svg.setFontSize(
-            rootSpan.innerHTML,
-            parentFontSize,
-          );
-        }
-      });
-    } else {
-      // ===== PATCHED: 按需加载未在内存的内联图标（懒加载）/ Load inline icon on demand =====
-      plugin.inlineIconLoader?.requestIcon(iconName);
-      // ===== END PATCH =====
+    // 图标可能尚未解析（按需加载）。此时仍然把短代码换成占位元素，而不是把
+    // `:LiView:` 留在原地——留着就要等某次重绘才能变成图标，而**链接悬停预览的浮层
+    // 不是 markdown leaf、永远不会被重绘**，于是那里会一直显示文字。
+    //
+    // The icon may not be resolved yet. The shortcode is still replaced by a placeholder
+    // rather than left as `:LiView:`: leaving it means waiting for a repaint, and the
+    // page-preview popover is not a markdown leaf and is never repainted, so the text would
+    // stay there.
+    const isIndexed = !iconObject && !!plugin.iconResolver?.find(iconName);
+    if (!iconObject && !isIndexed) {
+      return;
     }
+
+    const toReplace = text.splitText(code.index);
+    const rootSpan = createSpan({
+      cls: 'cm-iconize-icon',
+      attr: {
+        'aria-label': iconName,
+        'data-icon': iconName,
+        'aria-hidden': 'true',
+      },
+    });
+    rootSpan.style.display = 'inline-flex';
+    rootSpan.style.transform = 'translateY(13%)';
+
+    const parentElement = toReplace.parentElement;
+    const tagName = parentElement?.tagName?.toLowerCase() ?? '';
+    let fontSize = calculateFontTextSize();
+
+    if (isHeader(tagName)) {
+      fontSize = calculateHeaderSize(tagName as HTMLHeader);
+    }
+
+    if (iconObject) {
+      rootSpan.innerHTML = svg.setFontSize(iconObject.svgElement, fontSize);
+    } else {
+      // 交给加载器：解析完成后直接写入这个节点，不依赖重绘。
+      // Hand it to the loader: the markup lands in this node once resolved, with no repaint.
+      plugin.inlineIconLoader?.fillElement(rootSpan, iconName);
+    }
+
+    parentElement?.insertBefore(rootSpan, toReplace);
+    toReplace.textContent = toReplace.wholeText.substring(code.text.length);
+
+    // Set the font size to its parent font size if defined.
+    // We do this after that to not freeze the insertion while iterating over the tree.
+    // We are also updating the size after the animation because the styling won't be set
+    // in the first place.
+    requestAnimationFrame(() => {
+      const parentFontSize = parseFloat(
+        getComputedStyle(parentElement).fontSize,
+      );
+      if (!isNaN(parentFontSize)) {
+        rootSpan.innerHTML = svg.setFontSize(
+          rootSpan.innerHTML,
+          parentFontSize,
+        );
+      }
+    });
   });
 
   const emojiTreeWalker = createTreeWalker(plugin, element);
