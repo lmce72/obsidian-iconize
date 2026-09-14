@@ -51,10 +51,6 @@ export class ZipSource implements IconSource {
   public readonly type = 'zip' as const;
 
   /**
-   * 归档读取结果，保存 Promise 使并发调用共享同一次文件读取。
-   * Stored as a promise rather than the result so concurrent callers share one read.
-   */
-  /**
    * 归档的原始字节，读取后保留以复用。存 Promise 而非结果，使并发调用共享同一次读取。
    * Raw archive bytes, kept after the first read. A promise so concurrent callers share
    * one read.
