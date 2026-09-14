@@ -112,6 +112,13 @@ export default class IconizePlugin extends Plugin {
   private _saveDebounceTimer: number | null = null;
   private _savePending = false;
   private configPath = '.obsidian/plugins/obsidian-icon-folder/data.json';
+  /**
+   * 配置读取的结果 / Outcome of the last config read.
+   *
+   * `failed` 时禁止写回，避免用默认值覆盖用户真实的配置。
+   * While `failed`, saving is refused so defaults never overwrite the user's config.
+   */
+  private configLoadState: 'ok' | 'missing' | 'failed' = 'missing';
   // ===== END PATCH =====
 
   public getUsedIcons(): Set<string> {
@@ -1299,6 +1306,9 @@ export default class IconizePlugin extends Plugin {
       if (exists) {
         const raw = await this.app.vault.adapter.read(configPath);
         data = JSON.parse(raw);
+        this.configLoadState = 'ok';
+      } else {
+        this.configLoadState = 'missing';
       }
       if (data) {
         Object.entries(DEFAULT_SETTINGS).forEach(([k, v]) => {
@@ -1324,8 +1334,18 @@ export default class IconizePlugin extends Plugin {
         this.getConfigPath(),
         error,
       );
+      // 标记读取失败。此时内存里是默认值，一旦写回就会把用户真实的配置整个抹掉——
+      // 同步正在写入、移动端存储抖动、JSON 写到一半，都可能触发。
+      //
+      // Record the failure. The in-memory data is defaults at this point, and writing it
+      // back would erase the user's real config — a sync write in flight, a storage hiccup
+      // on mobile, or a half-written JSON file are all enough to trigger it.
+      this.configLoadState = 'failed';
       this.data = { settings: { ...DEFAULT_SETTINGS } };
-      new Notice('Icon folder config load failed, using defaults');
+      new Notice(
+        'Icon folder config could not be read. Saving is disabled for this session so the file is not overwritten.',
+        0,
+      );
     }
   }
 
@@ -1343,6 +1363,16 @@ export default class IconizePlugin extends Plugin {
       });
     }
 
+    // 配置没能读出来时拒绝保存：内存里是默认值，写下去等于清空用户配置。
+    // Refuse to save when the config could not be read: the in-memory data is defaults and
+    // writing it would clear the user's configuration.
+    if (this.configLoadState === 'failed') {
+      console.error(
+        '[iconize] Refusing to save the config: it could not be read, so the in-memory data is not the user data.',
+      );
+      return;
+    }
+
     this._savePending = true;
     try {
       const configPath = this.getConfigPath();
@@ -1351,10 +1381,36 @@ export default class IconizePlugin extends Plugin {
       if (!dirExists) {
         await this.app.vault.adapter.mkdir(dir);
       }
+
+      // 先写临时文件再改名：同步过程或其它进程可能恰好读到写入中途的文件，
+      // 改名是原子的，因此读到的永远是完整内容。
+      //
+      // Write to a temporary file and rename: a sync pass or another process can read the
+      // file mid-write, and a rename is atomic, so readers only ever see complete content.
+      const tmpPath = `${configPath}.tmp`;
       await this.app.vault.adapter.write(
-        configPath,
+        tmpPath,
         JSON.stringify(this.data, null, 2),
       );
+      try {
+        await this.app.vault.adapter.rename(tmpPath, configPath);
+      } catch (renameError) {
+        // 某些适配器可能不支持改名：退回直接写入，并把临时文件清掉。
+        // Some adapters may not support rename: fall back to a direct write and clean up.
+        console.warn(
+          '[iconize] Atomic rename unsupported, writing the config directly:',
+          renameError,
+        );
+        await this.app.vault.adapter.write(
+          configPath,
+          JSON.stringify(this.data, null, 2),
+        );
+        try {
+          await this.app.vault.adapter.remove(tmpPath);
+        } catch {
+          // 清理失败无关紧要。
+        }
+      }
     } catch (error) {
       console.error(
         '[iconize] Failed to save config to',
