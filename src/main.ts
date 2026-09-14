@@ -1500,4 +1500,25 @@ export default class IconizePlugin extends Plugin {
   public getIconPackManager(): IconPackManager {
     return this.iconPackManager;
   }
+
+  // ===== PATCHED: 释放已解析的归档 / Release parsed archives =====
+  /**
+   * 释放所有图标包已读入的归档字节。
+   * Releases every pack's loaded archive bytes.
+   *
+   * 启动时的预取结束后会释放一次，但之后的按需解析会重新打开归档并一直持有——大包的
+   * 原始字节可达 10 MB，几个包叠加就抵消了按需加载省下的内存。批次处理结束后释放即可，
+   * 需要时 `readEntry` 会透明地重新打开。
+   *
+   * Archives are released once prefetch finishes at start-up, but a later on-demand resolve
+   * reopens one and keeps it — a large pack's raw bytes reach 10 MB, and a few of those
+   * cancel out what lazy loading saves. Releasing after a batch is enough; `readEntry`
+   * reopens transparently when needed.
+   */
+  public releaseIconSources(): void {
+    for (const pack of this.iconPackManager?.getIconPacks() ?? []) {
+      pack.getSource()?.dispose();
+    }
+  }
+  // ===== END PATCH =====
 }

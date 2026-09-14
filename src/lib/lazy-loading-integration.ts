@@ -16,7 +16,7 @@ import { IconResolver } from './icon-resolver';
 import { InlineIconLoader } from './inline-icon-loader';
 import { buildIndex, isIndexStale, IconPackIndex } from './icon-indexing';
 import { FolderSource } from './icon-sources';
-import { indexDir, cacheDir } from './icon-layout';
+import { indexDir, cacheFile } from './icon-layout';
 
 export interface LazyLoadingSystem {
   store: IconIndexStore;
@@ -40,7 +40,7 @@ export async function initializeLazyLoading(
       plugin.app.vault.adapter,
       indexDir(plugin),
     );
-    const resolver = new IconResolver(plugin, cacheDir(plugin));
+    const resolver = new IconResolver(plugin, cacheFile(plugin));
     const manager = plugin.getIconPackManager();
 
     // 强制重建，使旧的索引格式或残留的索引文件不会沿用。

@@ -30,8 +30,16 @@ export const STATE_DIR_NAME = '.iconize';
 /** 每个图标包一个索引文件的子目录 / Subdirectory holding one index file per pack. */
 export const INDEX_DIR_NAME = 'index';
 
-/** 首次使用时提取出来的图标的子目录 / Subdirectory holding icons extracted on first use. */
-export const CACHE_DIR_NAME = 'cache';
+/**
+ * 已解析图标的缓存文件名 / Filename of the resolved-icon cache.
+ *
+ * 单一文件而非「每个图标一个文件」：缓存位于会被同步的插件目录内，上百个小文件意味着
+ * 上百次同步操作，合并成一个文件后同步只看到一次改动。
+ *
+ * One file rather than one per icon: the cache sits inside the plugin folder, which syncs,
+ * and a hundred small files means a hundred sync operations where a single file is one.
+ */
+export const CACHE_FILE_NAME = 'icons.json';
 
 /** 插件目录不可用时的回退路径 / Fallback when the plugin directory is unavailable. */
 const FALLBACK_PLUGIN_DIR = '.obsidian/plugins/obsidian-icon-folder';
@@ -59,8 +67,8 @@ export function indexDir(plugin: IconizePlugin): string {
 }
 
 /**
- * 存放已提取图标的目录 / Directory holding every cached icon.
+ * 已解析图标的缓存文件 / The resolved-icon cache file.
  */
-export function cacheDir(plugin: IconizePlugin): string {
-  return `${stateRoot(plugin)}/${CACHE_DIR_NAME}`;
+export function cacheFile(plugin: IconizePlugin): string {
+  return `${stateRoot(plugin)}/${CACHE_FILE_NAME}`;
 }

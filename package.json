@@ -69,6 +69,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "jszip": "^3.10.1"
+    "fflate": "^0.8.3"
   }
 }

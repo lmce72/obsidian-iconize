@@ -130,6 +130,14 @@ export class InlineIconLoader {
       `[InlineIconLoader] Batch complete: ${loaded}/${icons.length} loaded in ${elapsedMs}ms`,
     );
 
+    // 批次结束后释放归档字节：这一批可能刚打开过若干大包，不释放会一直占着内存。
+    // 需要时 `readEntry` 会重新打开。
+    //
+    // Release the archive bytes now the batch is done: it may have opened several large
+    // packs, and holding them costs memory until the plugin unloads. Sources reopen on the
+    // next read.
+    this.plugin.releaseIconSources();
+
     // 重新渲染打开的笔记以显示新加载的图标 / Re-render open notes.
     if (loaded > 0) {
       this.repaintOpenNotes();

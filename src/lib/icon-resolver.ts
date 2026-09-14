@@ -49,7 +49,24 @@ export class IconResolver {
   /** 仅为绘制预览而解析的图标，有上限且从不写盘。 */
   private previews: Map<string, ResolvedIcon>;
 
+  /** 缓存文件路径 / Path of the cache file. */
   private diskCachePath: string;
+
+  /**
+   * 磁盘缓存的内容，首次使用时整体读入一次。
+   * Contents of the disk cache, read once on first use.
+   *
+   * 单文件缓存意味着「读缓存」是一次文件读取而不是上百次；之后全部命中内存表。
+   * A single cache file means reading it is one file read instead of a hundred, after
+   * which every hit is an in-memory lookup.
+   */
+  private diskCache: Map<string, ResolvedIcon> | null = null;
+
+  /** 有未落盘的改动 / Whether there are changes not yet written. */
+  private diskCacheDirty = false;
+
+  /** 延迟写盘的定时器 / Timer for the deferred write. */
+  private flushTimer: number | null = null;
 
   /** 图标 id（小写）到定位信息的查找表。 */
   private lookup: Map<string, LocatedIcon>;
@@ -60,6 +77,97 @@ export class IconResolver {
     this.previews = new Map();
     this.diskCachePath = diskCachePath;
     this.lookup = new Map();
+  }
+
+  /**
+   * 读取整个缓存文件 / Loads the whole cache file.
+   *
+   * 条目必须自带可用标记：截断写入或旧格式会解析出无用内容，当作命中返回会让调用方
+   * 把 `undefined` 写进 DOM。
+   *
+   * Every entry must carry usable markup: a truncated write or an older format parses to
+   * something useless, and returning that as a hit makes the caller write `undefined` into
+   * the DOM.
+   */
+  private async ensureDiskCacheLoaded(): Promise<Map<string, ResolvedIcon>> {
+    if (this.diskCache) {
+      return this.diskCache;
+    }
+
+    const cache = new Map<string, ResolvedIcon>();
+    this.diskCache = cache;
+
+    try {
+      if (!(await this.plugin.app.vault.adapter.exists(this.diskCachePath))) {
+        return cache;
+      }
+
+      const raw = await this.plugin.app.vault.adapter.read(this.diskCachePath);
+      const parsed = JSON.parse(raw) as Record<string, ResolvedIcon>;
+      if (!parsed || typeof parsed !== 'object') {
+        return cache;
+      }
+
+      for (const [iconId, icon] of Object.entries(parsed)) {
+        if (
+          icon &&
+          typeof icon.svgElement === 'string' &&
+          icon.svgElement !== ''
+        ) {
+          cache.set(iconId, icon);
+        }
+      }
+    } catch (error) {
+      console.warn('[IconResolver] Could not read the icon cache:', error);
+    }
+
+    return cache;
+  }
+
+  /**
+   * 安排一次延迟写盘 / Schedules a deferred write.
+   *
+   * 启动时往往连续解析多个图标，逐次写盘会把整个文件反复重写。
+   * Startup resolves several icons in a row, and writing on each would rewrite the whole
+   * file repeatedly.
+   */
+  private scheduleFlush(): void {
+    this.diskCacheDirty = true;
+    if (this.flushTimer !== null) {
+      return;
+    }
+
+    this.flushTimer = window.setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushDiskCache();
+    }, 1000);
+  }
+
+  /**
+   * 把缓存写回磁盘 / Writes the cache back to disk.
+   */
+  private async flushDiskCache(): Promise<void> {
+    if (!this.diskCacheDirty || !this.diskCache) {
+      return;
+    }
+    this.diskCacheDirty = false;
+
+    try {
+      const dir = this.diskCachePath.substring(
+        0,
+        this.diskCachePath.lastIndexOf('/'),
+      );
+      if (!(await this.plugin.app.vault.adapter.exists(dir))) {
+        await this.ensureDirectoryPath(dir);
+      }
+
+      await this.plugin.app.vault.adapter.write(
+        this.diskCachePath,
+        JSON.stringify(Object.fromEntries(this.diskCache)),
+      );
+    } catch (error) {
+      console.error('[IconResolver] Failed to write the icon cache:', error);
+    }
   }
 
   /**
@@ -258,63 +366,26 @@ export class IconResolver {
   }
 
   /**
-   * 磁盘缓存路径 / Path of a cached icon.
+   * 查询磁盘缓存 / Looks an icon up in the disk tier.
    */
-  private cachePathOf(iconId: string): string {
-    return `${this.diskCachePath}/${iconId}.json`;
-  }
-
   private async loadFromDiskCache(
     iconId: string,
   ): Promise<ResolvedIcon | null> {
-    try {
-      const path = this.cachePathOf(iconId);
-      if (!(await this.plugin.app.vault.adapter.exists(path))) {
-        return null;
-      }
-      const content = await this.plugin.app.vault.adapter.read(path);
-      const parsed = JSON.parse(content);
-
-      // 缓存条目必须自带可用标记：截断写入或旧格式会解析出 `{}`，
-      // 若当作命中返回，调用方会把 `undefined` 写进 DOM，渲染出字符串 "undefined"。
-      //
-      // A cache entry must carry usable markup: a truncated write or an older schema
-      // parses to `{}`, and returning that as a hit makes the caller write `undefined`
-      // into the DOM, rendering the literal text "undefined".
-      if (
-        !parsed ||
-        typeof parsed.svgElement !== 'string' ||
-        parsed.svgElement === ''
-      ) {
-        return null;
-      }
-
-      return parsed;
-    } catch {
-      // 缓存未命中静默失败即可。
-      return null;
-    }
+    const cache = await this.ensureDiskCacheLoaded();
+    return cache.get(iconId) ?? null;
   }
 
   /**
-   * 保存到磁盘缓存 / Saves to the disk cache.
+   * 写入磁盘缓存 / Stores an icon in the disk tier.
+   *
+   * 只改内存表并安排一次延迟写盘，因此连续解析多个图标不会反复重写整个文件。
+   * Only the in-memory map is touched; the write is deferred, so resolving several icons in
+   * a row does not rewrite the whole file each time.
    */
   async saveToDiskCache(iconId: string, icon: ResolvedIcon): Promise<void> {
-    try {
-      const path = this.cachePathOf(iconId);
-      const dir = path.substring(0, path.lastIndexOf('/'));
-
-      if (!(await this.plugin.app.vault.adapter.exists(dir))) {
-        await this.ensureDirectoryPath(dir);
-      }
-
-      await this.plugin.app.vault.adapter.write(path, JSON.stringify(icon));
-    } catch (error) {
-      console.error(
-        `[IconResolver] Failed to save to disk cache: ${iconId}`,
-        error,
-      );
-    }
+    const cache = await this.ensureDiskCacheLoaded();
+    cache.set(iconId, icon);
+    this.scheduleFlush();
   }
 
   /**
@@ -346,8 +417,16 @@ export class IconResolver {
    */
   async clearDiskCache(): Promise<void> {
     try {
+      if (this.flushTimer !== null) {
+        window.clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+      }
+      this.diskCacheDirty = false;
+      this.diskCache?.clear();
+      this.diskCache = new Map();
+
       if (await this.plugin.app.vault.adapter.exists(this.diskCachePath)) {
-        await this.plugin.app.vault.adapter.rmdir(this.diskCachePath, true);
+        await this.plugin.app.vault.adapter.remove(this.diskCachePath);
         console.log('[IconResolver] Disk cache cleared');
       }
     } catch (error) {
@@ -383,18 +462,11 @@ export class IconResolver {
 
     // 磁盘缓存同样必须作废，否则下一次解析会在第 2 层命中旧内容。
     // The disk tier must be invalidated too, or the next resolve hits stale markup.
-    for (const iconId of iconIds) {
-      try {
-        const path = this.cachePathOf(iconId);
-        if (await this.plugin.app.vault.adapter.exists(path)) {
-          await this.plugin.app.vault.adapter.remove(path);
-        }
-      } catch (error) {
-        console.warn(
-          `[IconResolver] Could not remove cached icon '${iconId}':`,
-          error,
-        );
+    if (iconIds.size > 0 && this.diskCache) {
+      for (const iconId of iconIds) {
+        this.diskCache.delete(iconId);
       }
+      this.scheduleFlush();
     }
   }
 

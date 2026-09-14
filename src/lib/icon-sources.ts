@@ -7,7 +7,7 @@
  * names rather than bytes, and only icons actually used get decompressed.
  */
 
-import JSZip from 'jszip';
+import { strFromU8, unzipSync } from 'fflate';
 import { DataAdapter } from 'obsidian';
 import { logger } from './logger';
 
@@ -54,7 +54,12 @@ export class ZipSource implements IconSource {
    * 归档读取结果，保存 Promise 使并发调用共享同一次文件读取。
    * Stored as a promise rather than the result so concurrent callers share one read.
    */
-  private archive: Promise<JSZip> | null = null;
+  /**
+   * 归档的原始字节，读取后保留以复用。存 Promise 而非结果，使并发调用共享同一次读取。
+   * Raw archive bytes, kept after the first read. A promise so concurrent callers share
+   * one read.
+   */
+  private archive: Promise<Uint8Array> | null = null;
 
   constructor(
     private readonly adapter: DataAdapter,
@@ -62,11 +67,11 @@ export class ZipSource implements IconSource {
     private readonly extraPath = '',
   ) {}
 
-  private open(): Promise<JSZip> {
+  private open(): Promise<Uint8Array> {
     if (this.archive === null) {
       this.archive = this.adapter
         .readBinary(this.zipPath)
-        .then((buffer) => JSZip.loadAsync(buffer));
+        .then((buffer) => new Uint8Array(buffer));
 
       // 读取失败不能缓存，否则之后每次读取都会失败。
       // A failed read must not be cached, otherwise every later read fails too.
@@ -80,15 +85,26 @@ export class ZipSource implements IconSource {
 
   /**
    * 归档中全部条目的名称 / Every entry name in the archive.
+   *
+   * `filter` 对每个条目都会被调用，返回 `false` 即跳过解压——因此这里只走一遍归档末尾的
+   * 中央目录，不碰任何压缩数据。这是整套按需加载成立的前提：数千个图标的名字只花一次
+   * 目录遍历的代价。
+   *
+   * `filter` runs per entry, and returning `false` skips inflation — so this walks only the
+   * central directory at the end of the archive and never touches compressed data. That is
+   * what makes the whole scheme work: thousands of names for one directory pass.
    */
   private async listNames(): Promise<string[]> {
-    const zip = await this.open();
+    const bytes = await this.open();
 
     const names: string[] = [];
-    zip.forEach((relativePath: string, file: JSZip.JSZipObject) => {
-      if (!file.dir) {
-        names.push(relativePath);
-      }
+    unzipSync(bytes, {
+      filter: (file) => {
+        if (!file.name.endsWith('/')) {
+          names.push(file.name);
+        }
+        return false;
+      },
     });
     return names;
   }
@@ -161,14 +177,33 @@ export class ZipSource implements IconSource {
     return [];
   }
 
+  /**
+   * 读取单个条目 / Reads a single entry.
+   *
+   * `filter` 只放行目标条目，因此无论归档里有几千个图标，这里只解压这一个。
+   * The filter admits exactly one entry, so however many icons the archive holds, only
+   * this one is inflated.
+   */
   public async readEntry(path: string): Promise<string | null> {
-    const zip = await this.open();
-    const file = zip.file(path);
-    if (!file) {
+    try {
+      const bytes = await this.open();
+
+      const unzipped = unzipSync(bytes, {
+        filter: (file) => file.name === path,
+      });
+      const data = unzipped[path];
+
+      if (!data) {
+        return null;
+      }
+
+      return strFromU8(data);
+    } catch (error) {
+      logger.error(
+        `Could not read '${path}' from '${this.zipPath}' (${error})`,
+      );
       return null;
     }
-
-    return file.async('text');
   }
 
   public async fingerprint(): Promise<SourceFingerprint> {

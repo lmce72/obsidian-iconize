@@ -44,6 +44,14 @@ export default class IconsPickerModal extends FuzzySuggestModal<any> {
   onClose() {
     const { contentEl } = this;
     contentEl.empty();
+
+    // 浏览图标包会按需打开多个归档（预览不写盘，但字节会留在内存里）。关闭时释放，
+    // 否则大包的原始字节会一直占着，直到插件卸载。
+    //
+    // Browsing opens several archives on demand — previews are not persisted, but the bytes
+    // stay in memory. Release them on close, or a large pack's raw bytes remain held until
+    // the plugin unloads.
+    this.plugin.releaseIconSources();
   }
 
   getItemText(item: Icon): string {

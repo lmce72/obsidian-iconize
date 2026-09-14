@@ -6,6 +6,7 @@
  */
 
 import { getNormalizedName } from '@app/icon-pack-manager/util';
+import { logger } from './logger';
 import {
   IconSource,
   IconPackSourceType,
@@ -15,7 +16,7 @@ import {
 
 // ===== PATCHED: 索引类型定义 / Index types =====
 /** 索引格式版本，改动索引结构或命名规则时必须递增。 */
-export const ICON_PACK_INDEX_VERSION = 2;
+export const ICON_PACK_INDEX_VERSION = 3;
 
 /**
  * 图标包中的一个图标（不含 SVG 内容）/ A single icon inside a pack, without its SVG.
@@ -260,6 +261,70 @@ export async function buildIndex(
     builtAt: Date.now(),
     entries,
   };
+}
+
+/**
+ * 把索引序列化为紧凑形式 / Serializes an index into its compact form.
+ *
+ * 每个条目只落地 `name` 与 `path`：`id` 是前缀加名称、`displayName` 是 path 的文件名，
+ * `folder` 只在建索引时用于重名消解、之后不再读取——三者都可推导。加上不再缩进输出，
+ * 索引文件可缩小数倍，直接减轻同步负担。
+ *
+ * Only `name` and `path` are written per entry: `id` is the prefix plus the name,
+ * `displayName` is the path's filename, and `folder` is used only while building the index
+ * for collision handling and never read afterwards — all three are derivable. Combined with
+ * dropping the pretty-printing, the index file shrinks several-fold, which is directly less
+ * to sync.
+ */
+export function serializeIndex(index: IconPackIndex): string {
+  return JSON.stringify({
+    ...index,
+    entries: index.entries.map((entry) => [entry.name, entry.path]),
+  });
+}
+
+/**
+ * 由紧凑条目还原完整条目 / Expands a compact entry back into a full one.
+ */
+function expandEntry(prefix: string, name: string, path: string): IconEntry {
+  const lastSlash = path.lastIndexOf('/');
+  return {
+    id: `${prefix}${name}`,
+    name,
+    displayName: path.substring(lastSlash + 1).replace(/\.svg$/i, ''),
+    folder: lastSlash === -1 ? '' : path.substring(0, lastSlash),
+    path,
+  };
+}
+
+/**
+ * 解析索引文件 / Parses an index file.
+ *
+ * 同时接受紧凑形式（条目为二元数组）与早期形式（条目为对象），因此旧索引不会失效。
+ * Accepts both the compact form (entries as pairs) and the earlier form (entries as
+ * objects), so an existing index keeps working.
+ */
+export function deserializeIndex(raw: string): IconPackIndex | null {
+  try {
+    const parsed = JSON.parse(raw) as IconPackIndex & {
+      entries: unknown[];
+    };
+    if (!parsed || !Array.isArray(parsed.entries)) {
+      return null;
+    }
+
+    const prefix = parsed.prefix ?? '';
+    parsed.entries = parsed.entries.map((entry) =>
+      Array.isArray(entry)
+        ? expandEntry(prefix, entry[0] as string, entry[1] as string)
+        : (entry as IconEntry),
+    );
+
+    return parsed;
+  } catch (error) {
+    logger.warn(`Could not parse the icon index (${error})`);
+    return null;
+  }
 }
 
 /**

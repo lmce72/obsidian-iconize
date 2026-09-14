@@ -10,7 +10,11 @@
  */
 
 import { DataAdapter } from 'obsidian';
-import { IconPackIndex } from './icon-indexing';
+import {
+  IconPackIndex,
+  deserializeIndex,
+  serializeIndex,
+} from './icon-indexing';
 
 export class IconIndexStore {
   private adapter: DataAdapter;
@@ -48,7 +52,9 @@ export class IconIndexStore {
     try {
       await this.ensureDirectory();
       const path = `${this.indexPath}/${packName}.json`;
-      const content = JSON.stringify(index, null, 2);
+      // 紧凑序列化：条目只落地推导不出来的字段（见 `serializeIndex`）。
+      // Compact form: only the non-derivable fields are written (see `serializeIndex`).
+      const content = serializeIndex(index);
       await this.adapter.write(path, content);
       console.log(
         `[IconIndexStore] Saved index for ${packName} (${index.entries.length} icons)`,
@@ -72,7 +78,7 @@ export class IconIndexStore {
         return null;
       }
       const content = await this.adapter.read(path);
-      return JSON.parse(content);
+      return deserializeIndex(content);
     } catch (error) {
       console.error(
         `[IconIndexStore] Failed to load index for ${packName}:`,
