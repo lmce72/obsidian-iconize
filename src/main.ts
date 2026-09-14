@@ -119,6 +119,15 @@ export default class IconizePlugin extends Plugin {
    * While `failed`, saving is refused so defaults never overwrite the user's config.
    */
   private configLoadState: 'ok' | 'missing' | 'failed' = 'missing';
+  /**
+   * 内联标题当前的图标请求序号 / Sequence number of the current icon request per title.
+   *
+   * 内联标题元素跨文件复用，异步解析的结果回来时需要据此判断是否已被更新的请求取代。
+   * The inline title element is reused across files, so an async result needs this to tell
+   * whether a newer request has superseded it.
+   */
+  private titleIconRequest = new WeakMap<HTMLElement, number>();
+  private titleIconRequestSeq = 0;
   // ===== END PATCH =====
 
   public getUsedIcons(): Set<string> {
@@ -896,6 +905,19 @@ export default class IconizePlugin extends Plugin {
     // Same color source as tab icons; folder notes fall back to their folder's color.
     const color = this.getEffectiveIconColor(path);
 
+    // 为这次请求打上序号：内联标题元素会被复用，异步结果回来时若已有更新的请求，就该丢弃。
+    // 用「当前应当显示哪个图标」的标记来比对是不成立的——切换文件时元素上留着的正是**上一
+    // 个文件**的图标，那会被误判成「用户已切走」，于是新文件的图标永远加不上，
+    // 表现为标题图标不显示。
+    //
+    // Tag this request with a sequence number: the inline title element is reused, so a
+    // result that arrives after a newer request must be dropped. Comparing against the
+    // element's current icon does not work — on a file switch the element still carries the
+    // *previous* file's icon, which reads as "the user moved on" and silently blocks the new
+    // file's icon, leaving no icon above the title at all.
+    const requestId = ++this.titleIconRequestSeq;
+    this.titleIconRequest.set(inlineTitleEl, requestId);
+
     if (emoji.isEmoji(iconNameWithPrefix)) {
       titleIcon.remove(inlineTitleEl);
       titleIcon.add(this, inlineTitleEl, iconNameWithPrefix, {
@@ -933,14 +955,9 @@ export default class IconizePlugin extends Plugin {
           if (!svgMarkup || !inlineTitleEl.isConnected) {
             return;
           }
-          // 内联标题元素跨文件复用：若它此刻代表的是别的图标，说明用户已经切走，丢弃这次结果。
-          // The inline title is reused across files; if it now stands for a different icon
-          // the user has moved on, so drop this result.
-          const current = inlineTitleEl.parentElement
-            ? titleIcon.get(inlineTitleEl.parentElement)
-            : null;
-          const marker = current?.getAttribute(config.ICON_ATTRIBUTE_NAME);
-          if (marker && marker !== iconNameWithPrefix) {
+          // 已被更新的请求取代（用户切到了别的文件）：丢弃这次结果。
+          // Superseded by a newer request (the user moved to another file): drop it.
+          if (this.titleIconRequest.get(inlineTitleEl) !== requestId) {
             return;
           }
 
