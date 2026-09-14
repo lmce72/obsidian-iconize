@@ -19,7 +19,12 @@ export const buildLinkDecorations = (
       from,
       to,
       enter: (node) => {
-        const tokenProps = node.type.prop(tokenClassNodeProp);
+        // 显式标注类型：`tokenClassNodeProp` 由本仓库的类型增强补上（见
+        // src/@types/codemirror-language.d.ts），推断不出泛型参数。
+        // Annotated explicitly: `tokenClassNodeProp` comes from this repo's type
+        // augmentation, from which the generic argument cannot be inferred.
+        const tokenProps: string | undefined =
+          node.type.prop(tokenClassNodeProp);
         if (tokenProps) {
           const props = new Set(tokenProps.split(' '));
           const isLink = props.has('hmd-internal-link');

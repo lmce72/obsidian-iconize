@@ -56,6 +56,16 @@ interface SetIconForNodeOptions {
    * Browsing the picker touches thousands of icons that are only ever previewed.
    */
   persist?: boolean;
+  /**
+   * 是否把图标名写成节点的 `title`（悬停提示）/ Whether the icon name becomes the node's title.
+   *
+   * 默认开启，与文件浏览器等既有节点保持一致；建议列表里图标旁边已经写了名称，
+   * 再挂一个重复的提示只是噪声，那里传 `false`。
+   *
+   * On by default, matching existing nodes such as the file explorer. Suggestions already
+   * print the name next to the icon, where a duplicate tooltip is only noise.
+   */
+  applyTitle?: boolean;
 }
 
 /**
@@ -79,7 +89,9 @@ const applyIconContent = (
     iconContent = svg.colorize(iconContent, options.color);
   }
   node.innerHTML = iconContent;
-  node.setAttribute('title', iconName);
+  if (options.applyTitle !== false) {
+    node.setAttribute('title', iconName);
+  }
 };
 
 /**

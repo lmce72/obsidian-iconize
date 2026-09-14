@@ -95,8 +95,7 @@ describe('setIconForNode', () => {
         extraMargin: {},
       }),
       getIconPackManager: () => ({
-        getIconPacks: (): any => [],
-        getPreloadedIcons: (): any => [],
+        getIconPackByPrefix: (): any => undefined,
       }),
     };
     getSvgFromLoadedIcon = vi.spyOn(util, 'getSvgFromLoadedIcon');

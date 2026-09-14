@@ -92,24 +92,31 @@ export default class SuggestionIcon extends EditorSuggest<string> {
     el.style.alignItems = 'center';
     el.style.gap = '0.25rem';
 
-    // 图标可能在索引中但尚未解析（按需加载），此时交给 dom.setIconForNode 异步补齐。
-    // The icon may be indexed but not yet resolved; dom.setIconForNode fills it in.
+    // 图标可能已在索引中但尚未解析（按需加载）：交给 dom.setIconForNode，
+    // 它会异步取回后填充这个容器。
+    // The icon may be indexed but not yet resolved; dom.setIconForNode fills this
+    // container in once it has the markup.
     if (
       icon.getIconByName(this.plugin, value) ||
       this.plugin.iconResolver?.find(value)
     ) {
-      const iconEl = el.createSpan();
-      dom.setIconForNode(this.plugin, value, iconEl, {
+      const iconContainer = el.createSpan();
+      dom.setIconForNode(this.plugin, value, iconContainer, {
         shouldApplyAllStyles: false,
+        // 名称就在图标旁边显示，不再挂重复的悬停提示。
+        // The name is printed beside the icon, so no duplicate tooltip.
+        applyTitle: false,
       });
+      el.appendText(' ');
       el.createSpan({ text: value });
       return;
     }
 
     // Suggest an emoji - display its shortcode version.
-    el.createSpan({ text: value });
     const shortcode = emoji.getShortcode(value);
     if (shortcode) {
+      el.createSpan({ text: value });
+      el.appendText(' ');
       el.createSpan({ text: shortcode });
     }
   }

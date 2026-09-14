@@ -62,7 +62,12 @@ const add = (
   }
 
   titleIcon.classList.add(config.TITLE_ICON_CLASS);
-  titleIcon.setAttribute(config.ICON_ATTRIBUTE_NAME, options?.iconName ?? '');
+  // 仅在调用方提供了标识时写入该属性；它只用于异步结果的比对，无标识时不必留下空属性。
+  // Only written when the caller supplies an identifier: it exists to compare async
+  // results against, and an empty attribute would be noise.
+  if (options?.iconName) {
+    titleIcon.setAttribute(config.ICON_ATTRIBUTE_NAME, options.iconName);
+  }
   // Checks if the passed element is an emoji.
   if (emoji.isEmoji(svgElement) && options.fontSize) {
     svgElement =

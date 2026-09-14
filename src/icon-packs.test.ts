@@ -3,7 +3,9 @@ import { getExtraPath } from './icon-packs';
 
 it('should return the correct extra path for an icon pack', () => {
   const iconPackName = 'simple-icons';
-  const expectedPath = 'simple-icons-16.5.0/icons/';
+  // 与 `icon-packs.ts` 中声明的版本及下载链接保持一致（当前为 16.15.0）。
+  // Kept in step with the version declared in `icon-packs.ts` and its download link.
+  const expectedPath = 'simple-icons-16.15.0/icons/';
 
   const path = getExtraPath(iconPackName);
 

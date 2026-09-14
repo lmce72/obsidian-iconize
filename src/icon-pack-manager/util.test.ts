@@ -51,38 +51,41 @@ describe('nextIdentifier', () => {
 });
 
 describe('getSvgFromLoadedIcon', () => {
+  const packFor = (prefix: string, name: string, svgElement: string) => ({
+    getIcon: vi.fn((iconName: string) =>
+      iconName === name ? { prefix, name, svgElement } : undefined,
+    ),
+  });
+
   const mockPlugin = {
     getIconPackManager: vi.fn(() => ({
-      getPreloadedIcons: vi.fn(() => [
-        { prefix: 'fa', name: 'user', svgElement: '<svg>preloaded</svg>' },
-      ]),
-      getIconPacks: vi.fn(() => [
-        {
-          getIcons: vi.fn(() => [
-            {
-              prefix: 'md',
-              name: 'settings',
-              svgElement: '<svg>material</svg>',
-            },
-          ]),
-        },
-      ]),
+      getIconPackByPrefix: vi.fn((prefix: string) =>
+        prefix === 'md'
+          ? packFor('md', 'settings', '<svg>material</svg>')
+          : undefined,
+      ),
     })),
   } as unknown as IconizePlugin;
 
-  it('should find preloaded icon', () => {
-    const result = getSvgFromLoadedIcon(mockPlugin, 'fa', 'user');
-    expect(result).toBe('<svg>preloaded</svg>');
+  it('should prefer the icon the resolver already holds in memory', () => {
+    const withResolver = {
+      ...mockPlugin,
+      iconResolver: { peek: () => ({ svgElement: '<svg>memory</svg>' }) },
+    } as unknown as IconizePlugin;
+
+    expect(getSvgFromLoadedIcon(withResolver, 'md', 'settings')).toBe(
+      '<svg>memory</svg>',
+    );
   });
 
-  it('should search icon packs when not preloaded', () => {
-    const result = getSvgFromLoadedIcon(mockPlugin, 'md', 'settings');
-    expect(result).toBe('<svg>material</svg>');
+  it('should look the pack up by prefix when the resolver has nothing', () => {
+    expect(getSvgFromLoadedIcon(mockPlugin, 'md', 'settings')).toBe(
+      '<svg>material</svg>',
+    );
   });
 
   it('should return empty string when not found', () => {
-    const result = getSvgFromLoadedIcon(mockPlugin, 'none', 'missing');
-    expect(result).toBe('');
+    expect(getSvgFromLoadedIcon(mockPlugin, 'none', 'missing')).toBe('');
   });
 });
 

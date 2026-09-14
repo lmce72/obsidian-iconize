@@ -8,6 +8,7 @@ import {
   vi,
 } from 'vitest';
 import icon from '@lib/icon';
+import * as iconUtil from '@app/icon-pack-manager/util';
 import { IconPackManager } from '@app/icon-pack-manager';
 import * as util from '@app/util';
 import SuggestionIcon from './icons-suggestion';
@@ -97,13 +98,23 @@ describe('renderSuggestion', () => {
           svgElement: '<svg></svg>',
         }) as any,
     );
+    // 图标标记由 `dom.setIconForNode` 填进容器（内存未命中时异步补齐），
+    // 所以这里打桩的是它的取图标来源，而不是 `getIconByName`。
+    // The markup is filled into a container by `dom.setIconForNode` (asynchronously when
+    // not in memory), so the stub belongs on its icon source, not on `getIconByName`.
+    const getSvg = vi
+      .spyOn(iconUtil, 'getSvgFromLoadedIcon')
+      .mockReturnValue('<svg></svg>');
 
     const el = document.createElement('div');
     suggestionIcon.renderSuggestion('heart_fill', el);
 
-    expect(el.innerHTML).toBe('<svg></svg> <span>heart_fill</span>');
+    expect(el.innerHTML).toBe(
+      '<span><svg></svg></span> <span>heart_fill</span>',
+    );
 
     getIconByName.mockRestore();
+    getSvg.mockRestore();
   });
 
   it('should render a emoji suggestion when the value is an icon', () => {
