@@ -72,15 +72,26 @@ export default class IconsPickerModal extends FuzzySuggestModal<any> {
 
         const nextLetter = nextIdentifier(iconName);
         const iconPrefix = iconName.substring(0, nextLetter);
-        const iconPackName = this.plugin
+
+        // 这里必须按「前缀」查找图标包，而不是按包名：`iconPrefix` 是前缀（如 `Fabp`），
+        // 包名却是 `font-awesome-brands-prime`。按包名查找永远返回 undefined，紧接着的
+        // `.getName()` 会抛 TypeError，使整个拾取器打不开——最近使用列表里只要有一个
+        // 非 emoji 图标就会触发。
+        //
+        // The pack has to be looked up by *prefix*, not by name: `iconPrefix` is a prefix
+        // such as `Fabp` while the pack is named `font-awesome-brands-prime`. A name
+        // lookup always returns undefined, and the `.getName()` that followed threw a
+        // TypeError that broke the whole picker as soon as one non-emoji icon was in the
+        // recently-used list.
+        const iconPack = this.plugin
           .getIconPackManager()
-          .getIconPackByName(iconPrefix)
-          .getName();
+          .getIconPackByPrefix(iconPrefix);
+
         iconKeys.push({
           name: iconName.substring(nextLetter),
           prefix: iconPrefix,
           displayName: iconName,
-          iconPackName: iconPackName,
+          iconPackName: iconPack?.getName() ?? null,
           filename: '',
           svgContent: '',
           svgElement: '',

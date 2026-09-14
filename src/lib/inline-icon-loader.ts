@@ -47,8 +47,24 @@ export class InlineIconLoader {
       return;
     }
 
+    const resolver = this.plugin.iconResolver;
+    if (!resolver) {
+      return;
+    }
+
     // 检查是否已加载到内存 / Check if already loaded.
-    if (this.plugin.iconResolver && this.plugin.iconResolver.peek(iconId)) {
+    if (resolver.peek(iconId)) {
+      return;
+    }
+
+    // 只有确实存在于索引中的图标才值得排队。短代码正则会顺带匹配到别的冒号文本
+    // （例如时间 `12:39:16` 里的 `:39:`、`:16:`），给它们排队只会刷出
+    // "Icon not found" 噪音——它们根本不是图标名。
+    //
+    // Only icons that really exist in the index are worth queueing. The shortcode regex
+    // also matches incidental colon-delimited text — the `:39:` and `:16:` inside a time
+    // like `12:39:16` — and queueing those only produces "Icon not found" noise.
+    if (!resolver.find(iconId)) {
       return;
     }
 
