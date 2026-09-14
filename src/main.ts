@@ -178,12 +178,7 @@ export default class IconizePlugin extends Plugin {
     await migrate(this);
 
     const usedIconNames = this.getUsedIcons();
-    // if (!this.doesUseCustomLucideIconPack()) {
     await this.iconPackManager.init();
-    // }
-    // TODO: Check if needed
-    // [LEGACY] 旧方法：全量预载已用图标，被 initLazyLoading（按需加载）取代，日后可移除。
-    // await this.iconPackManager.loadUsedIcons([...usedIconNames]);
     await this.initLazyLoading([...usedIconNames]);
 
     this.app.workspace.onLayoutReady(() => this.handleChangeLayout());
@@ -395,13 +390,23 @@ export default class IconizePlugin extends Plugin {
 
   // ===== PATCHED: 按需加载初始化 / Lazy loading initialization =====
   /**
-   * 初始化按需加载系统并预取已用图标；失败时回退到 legacy 全量加载。
+   * 初始化按需加载系统并预取已用图标。
+   * Initializes the lazy loading system and prefetches the icons in use.
+   *
+   * 初始化失败时不再回退到旧的全量预载：那条路径读取的是外部 SVG 文件，而当前模型
+   * 从不写出这类文件，回退只会让整个仓库无图标且毫无提示。这里明确报错。
+   *
+   * Failure no longer falls back to the old full preload: that path reads extracted SVG
+   * files which this model never writes, so it would leave the vault iconless without
+   * saying so. Report the failure instead.
    */
   private async initLazyLoading(usedIconNames: string[]): Promise<void> {
     const system = await initializeLazyLoading(this, usedIconNames);
     if (!system) {
-      // [LEGACY] 回退到旧的全量预载逻辑，日后可移除。
-      await this.iconPackManager.loadUsedIcons(usedIconNames);
+      new Notice(
+        `[${config.PLUGIN_NAME}] Icon loading could not be initialised. See the console for details.`,
+        10000,
+      );
       this.eventEmitter.emit('allIconsLoaded');
       return;
     }
@@ -480,21 +485,23 @@ export default class IconizePlugin extends Plugin {
     });
 
     icon.addAll(this, data, this.registeredFileExplorers, () => {
-      // After initialization of the icon packs, checks the vault for missing icons and
-      // adds them.
-      this.iconPackManager.loadAll().then(async () => {
-        if (this.getSettings().iconsBackgroundCheckEnabled) {
-          const data = Object.entries(this.data) as [
-            string,
-            string | FolderIconObject,
-          ][];
-          await icon.checkMissingIcons(this, data);
-          // TODO: Check if needed
-          // resetPreloadedIcons();
+      // 图标包在启动时已建好索引，此处只需处理缺失图标的后台检查。
+      // Packs are already indexed at start-up; only the background check is left here.
+      void (async () => {
+        try {
+          if (this.getSettings().iconsBackgroundCheckEnabled) {
+            const data = Object.entries(this.data) as [
+              string,
+              string | FolderIconObject,
+            ][];
+            await icon.checkMissingIcons(this, data);
+          }
+        } catch (error) {
+          console.error('[Iconize] Background icon check failed:', error);
         }
 
         this.eventEmitter.emit('allIconsLoaded');
-      });
+      })();
 
       if (this.getSettings().iconInFrontmatterEnabled) {
         const activeFile = this.app.workspace.getActiveFile();

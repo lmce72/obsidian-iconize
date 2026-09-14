@@ -20,49 +20,24 @@ export function getSvgFromLoadedIcon(
   iconPrefix: string,
   iconName: string,
 ): string {
-  let icon = '';
-
-  // ===== PATCHED: 优先从按需加载解析器内存缓存查找 / Check resolver cache first =====
+  // 1) 内存层优先：按需加载已解析的图标在这里命中，渲染路径靠它保持同步。
+  // Memory first: icons the lazy layer has resolved are found here, which is what keeps
+  // the render path synchronous.
   const resolved = plugin.iconResolver?.peek(iconPrefix + iconName);
   if (resolved) {
     return resolved.svgElement;
   }
-  // ===== END PATCH =====
 
-  let foundIcon = plugin
-    .getIconPackManager()
-    .getPreloadedIcons()
-    .find(
-      (icon) =>
-        icon.prefix.toLowerCase() === iconPrefix.toLowerCase() &&
-        icon.name.toLowerCase() === iconName.toLowerCase(),
-    );
-  if (!foundIcon) {
-    plugin
-      .getIconPackManager()
-      .getIconPacks()
-      .forEach((iconPack) => {
-        const icon = iconPack.getIcons().find((icon) => {
-          return (
-            icon.prefix.toLowerCase() === iconPrefix.toLowerCase() &&
-            getNormalizedName(icon.name).toLowerCase() ===
-              iconName.toLowerCase()
-          );
-        });
-        if (icon) {
-          foundIcon = icon;
-        }
-      });
-  }
-
-  if (foundIcon) {
-    icon = foundIcon.svgElement;
-  }
-
-  // 索引包只提供元数据（`svgElement` 为空），此时返回空串让调用方走按需解析。
-  // Index-backed packs provide metadata only; an empty result signals the caller to
-  // resolve on demand instead.
-  return icon;
+  // 2) 直接按前缀定位图标包，只查它一个。此前会遍历所有包并对每个包调用 `getIcons()`，
+  //    而索引包会为此构建整份图标列表（数千条元数据），每次都发生，代价过高。
+  //
+  // 3) 索引包只提供元数据（`svgElement` 为空），返回空串表示应由调用方按需解析。
+  //
+  // Look the pack up by prefix and query only that one. Previously every pack was walked
+  // and `getIcons()` called on each, which materializes thousands of metadata objects per
+  // lookup for index-backed packs. An empty result means the caller should resolve.
+  const pack = plugin.getIconPackManager().getIconPackByPrefix(iconPrefix);
+  return pack?.getIcon(iconName)?.svgElement ?? '';
 }
 
 const validIconName = /^[(A-Z)|(0-9)]/;

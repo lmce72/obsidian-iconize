@@ -4,10 +4,7 @@ import { LUCIDE_ICON_PACK_NAME, LucideIconPack } from './lucide';
 import IconizePlugin from '@app/main';
 import { FileManager } from './file-manager';
 import { IconPack } from './icon-pack';
-import { readZipFile } from '@app/zip-util';
 import { logger } from '@app/lib/logger';
-import JSZip from 'jszip';
-import { generateIcon, getNormalizedName, nextIdentifier } from './util';
 import { getExtraPath } from '@app/icon-packs';
 import {
   FolderSource,
@@ -34,8 +31,6 @@ export class IconPackManager {
   private lucideIconPack: LucideIconPack;
   private fileManager: FileManager;
 
-  private preloadedIcons: Icon[];
-
   /**
    * 与已安装图标包同名的解压目录。
    * Unpacked directories that share a name with an installed archive.
@@ -54,7 +49,6 @@ export class IconPackManager {
     this.lucideIconPack = new LucideIconPack(plugin, this);
     this.fileManager = new FileManager(plugin);
     this.iconPacks = [];
-    this.preloadedIcons = [];
     this.shadowedFolders = new Map();
   }
 
@@ -173,94 +167,6 @@ export class IconPackManager {
     this.shadowedFolders.delete(name);
   }
 
-  // [LEGACY] 旧方法：全量解压所有图标包到内存（约 2 秒 / 数千个图标），
-  // 已被按需加载取代 —— 索引在 init 阶段建立，图标由 IconResolver 按需解析。
-  // 保留为 no-op 以兼容既有调用点，日后可连同调用点一起移除。
-  public async loadAll(): Promise<void> {
-    logger.info(
-      'loadAll() is a no-op: icon packs are index-backed and icons resolve on demand',
-    );
-  }
-
-  // [LEGACY] 旧的全量解压实现，保留仅供参考，日后可删除。
-  private async loadAllUnpacked(): Promise<void> {
-    const loadedIconPacks = await this.plugin.app.vault.adapter.list(this.path);
-
-    // Extract all zip files which will be downloaded icon packs.
-    const zipFiles: Record<string, JSZip.JSZipObject[]> = {};
-    for (let i = 0; i < loadedIconPacks.files.length; i++) {
-      const fileName = loadedIconPacks.files[i];
-      if (fileName.endsWith('.zip')) {
-        const arrayBuffer =
-          await this.plugin.app.vault.adapter.readBinary(fileName);
-        const files = await readZipFile(arrayBuffer);
-        const iconPackName = fileName.split('/').pop().split('.zip')[0];
-        zipFiles[iconPackName] = files;
-      }
-    }
-
-    // Check for custom-made icon packs.
-    for (let i = 0; i < loadedIconPacks.folders.length; i++) {
-      const folderName = loadedIconPacks.folders[i].split('/').pop();
-      // Continue if the icon pack does have a zip file.
-      if (zipFiles[folderName]) {
-        continue;
-      }
-
-      const iconPack = new IconPack(this.plugin, folderName, true);
-
-      const files = await this.fileManager.getFilesInDirectory(
-        `${this.path}/${folderName}`,
-      );
-      const loadedIcons: Icon[] = [];
-      // Convert files into loaded svgs.
-      for (let j = 0; j < files.length; j++) {
-        const iconNameRegex = files[j].match(
-          new RegExp(this.path + '/' + folderName + '/(.*)'),
-        );
-        const iconName = getNormalizedName(iconNameRegex[1]);
-        const iconContent = await this.plugin.app.vault.adapter.read(files[j]);
-        const icon = generateIcon(iconPack, iconName, iconContent);
-        if (icon) {
-          loadedIcons.push(icon);
-        }
-      }
-
-      if (!this.getIconPackByName(folderName)) {
-        this.iconPacks.push(iconPack);
-        logger.info(
-          `Loaded icon pack '${folderName}' (amount of icons: ${loadedIcons.length})`,
-        );
-      }
-    }
-
-    // Extract all files from the zip files.
-    for (const zipFile in zipFiles) {
-      const files = zipFiles[zipFile];
-      const existingIconPack = this.getIconPackByName(zipFile);
-      const iconPack =
-        existingIconPack ?? new IconPack(this.plugin, zipFile, false);
-      const loadedIcons: Icon[] = await this.fileManager.getIconsFromZipFile(
-        iconPack,
-        files,
-      );
-      if (
-        zipFile === LUCIDE_ICON_PACK_NAME &&
-        !this.plugin.doesUseCustomLucideIconPack()
-      ) {
-        continue;
-      }
-
-      iconPack.setIcons(loadedIcons);
-      if (!existingIconPack) {
-        this.iconPacks.push(iconPack);
-      }
-      logger.info(
-        `Loaded icon pack '${zipFile}' (amount of icons: ${loadedIcons.length})`,
-      );
-    }
-  }
-
   public async createDefaultDirectory(): Promise<void> {
     await this.fileManager.createDirectory(this.path, '');
   }
@@ -295,96 +201,6 @@ export class IconPackManager {
     void iconContent;
   }
   // ===== END PATCH =====
-
-  // [LEGACY] 旧的解压到外部 SVG 文件实现，保留仅供参考，日后可删除。
-  private async extractIconToFile(
-    icon: Icon,
-    iconContent: string,
-  ): Promise<void> {
-    const doesIconPackDirExist = await this.plugin.app.vault.adapter.exists(
-      `${this.path}/${icon.iconPackName}`,
-    );
-    if (!doesIconPackDirExist) {
-      await this.plugin.app.vault.adapter.mkdir(
-        `${this.path}/${icon.iconPackName}`,
-      );
-    }
-
-    const doesIconFileExists = await this.plugin.app.vault.adapter.exists(
-      `${this.path}/${icon.iconPackName}/${icon.name}.svg`,
-    );
-    if (!doesIconFileExists) {
-      await this.fileManager.createFile(
-        icon.iconPackName,
-        this.path,
-        `${icon.name}.svg`,
-        iconContent,
-      );
-    }
-  }
-
-  public async loadUsedIcons(icons: string[]): Promise<void> {
-    for (let i = 0; i < icons.length; i++) {
-      const entry = icons[i];
-      if (!entry) {
-        continue;
-      }
-
-      await this.loadPreloadedIcon(entry);
-    }
-  }
-
-  public async loadPreloadedIcon(iconName: string): Promise<void> {
-    const nextLetter = nextIdentifier(iconName);
-    const prefix = iconName.substring(0, nextLetter);
-    const name = iconName.substring(nextLetter);
-
-    const iconPack = this.getIconPackByPrefix(prefix);
-
-    if (!iconPack) {
-      // Ignore because background check automatically adds the icons and icon pack
-      // directories.
-      if (!this.plugin.getSettings().iconsBackgroundCheckEnabled) {
-        new Notice(
-          `Seems like you do not have an icon pack installed. (${iconName})`,
-          5000,
-        );
-      }
-      return;
-    }
-
-    if (
-      iconPack.getName() === LUCIDE_ICON_PACK_NAME &&
-      this.plugin.doesUseNativeLucideIconPack()
-    ) {
-      // Native lucide icons already exist for Obsidian.
-      const lucideIcons = this.iconPacks.find(
-        (iconPack) => iconPack.getName() === LUCIDE_ICON_PACK_NAME,
-      );
-      const icon = lucideIcons.getIcons().find((icon) => icon.name === name);
-      if (!icon) {
-        logger.warn(
-          `Icon ${icon} does not exist in the native Lucide icon pack.`,
-        );
-        return;
-      }
-
-      this.preloadedIcons.push(icon);
-      return;
-    }
-
-    const fullPath = this.path + '/' + iconPack.getName() + '/' + name + '.svg';
-    if (!(await this.plugin.app.vault.adapter.exists(fullPath))) {
-      logger.error(
-        `Icon with name '${name}' was not found (full path: ${fullPath})`,
-      );
-      return;
-    }
-
-    const content = await this.plugin.app.vault.adapter.read(fullPath);
-    const icon = generateIcon(iconPack, name, content);
-    this.preloadedIcons.push(icon);
-  }
 
   public async createCustomIconPackDirectory(dir: string): Promise<void> {
     await this.fileManager.createDirectory(this.path, dir);
@@ -437,16 +253,21 @@ export class IconPackManager {
     this.iconPacks.push(iconPack);
 
     const count = await indexAndRegisterPack(this.plugin, iconPack);
+
     if (count === 0) {
-      // 按需加载层不可用（或归档无可索引图标）时退回旧的内存结构，保证图标仍可用。
-      const files = await readZipFile(arrayBuffer);
-      const loadedIcons: Icon[] = await this.fileManager.getIconsFromZipFile(
-        iconPack,
-        files,
+      // 归档已落盘，但本次会话没能索引它（按需加载层未就绪，或归档里没有可索引的图标）。
+      // 不做内存回退：那条路径依赖已被移除的旧结构，且会让这个包只在本次会话可用、
+      // 行为与其它包不一致。明确报错让用户重载。
+      //
+      // The archive is on disk but was not indexed this session. No in-memory fallback: it
+      // depended on the removed structures and would make this pack behave differently
+      // from every other one. Report it and let the user reload.
+      logger.error(
+        `Icon pack ${name} was saved but could not be indexed; reload Obsidian to pick it up`,
       );
-      iconPack.setIcons(loadedIcons);
-      logger.info(
-        `Loaded icon pack ${name} into memory (amount of icons: ${loadedIcons.length})`,
+      new Notice(
+        `[${config.PLUGIN_NAME}] ${name} was saved but could not be indexed. Reload Obsidian to use it.`,
+        10000,
       );
       return;
     }
@@ -605,10 +426,6 @@ export class IconPackManager {
 
   public getIconPacks(): IconPack[] {
     return this.iconPacks;
-  }
-
-  public getPreloadedIcons(): Icon[] {
-    return this.preloadedIcons;
   }
 
   public getFileManager(): FileManager {
