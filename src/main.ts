@@ -129,7 +129,32 @@ export default class IconizePlugin extends Plugin {
     return new Set([...usedIconsInPaths, ...usedIconsInCustomRules]);
   }
 
+  /**
+   * 插件入口 / Plugin entry point.
+   *
+   * 整体受保护：任何未预料的异常都会变成一条界面提示，而不是让 Obsidian 把插件判为
+   * 「加载失败」并停用。移动端无法打开开发者工具，所以提示必须可见——否则用户只能看到
+   * 一句「加载失败」，无从排查。
+   *
+   * Guarded as a whole: an unforeseen exception becomes a visible notice rather than making
+   * Obsidian disable the plugin as "failed to load". Mobile has no developer tools, so the
+   * message has to be on screen — otherwise the user is left with nothing to diagnose.
+   */
   async onload() {
+    try {
+      await this.initialize();
+    } catch (error) {
+      console.error(`[${config.PLUGIN_NAME}] Failed to load:`, error);
+      new Notice(
+        `[${config.PLUGIN_NAME}] Failed to load: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        0,
+      );
+    }
+  }
+
+  private async initialize(): Promise<void> {
     console.log(`loading ${config.PLUGIN_NAME}`);
 
     await this.loadIconFolderData();
@@ -142,7 +167,23 @@ export default class IconizePlugin extends Plugin {
     // defaults and writes them back, erasing the pointer it depends on.
     const savedConfigPath = this.getSettings().configFilePath;
     if (savedConfigPath && savedConfigPath !== this.getConfigPath()) {
-      if (await this.app.vault.adapter.exists(savedConfigPath)) {
+      // 这次探测同样必须受保护：移动端存储不可用时它会抛错，而此处位于加载早期，
+      // 异常会直接导致 Obsidian 把插件判为「加载失败」。
+      //
+      // This probe must be guarded too: it throws when mobile storage is unavailable, and
+      // sitting as early in load as it does, the exception makes Obsidian report the whole
+      // plugin as failed to load.
+      let targetExists = false;
+      try {
+        targetExists = await this.app.vault.adapter.exists(savedConfigPath);
+      } catch (error) {
+        console.warn(
+          `[${config.PLUGIN_NAME}] Could not check config file '${savedConfigPath}':`,
+          error,
+        );
+      }
+
+      if (targetExists) {
         this.setConfigPath(savedConfigPath);
         await this.loadIconFolderData();
       } else {
@@ -172,14 +213,37 @@ export default class IconizePlugin extends Plugin {
       this.modifiedInternalPlugins.push(new OutlineInternalPlugin(this));
     }
 
-    await this.iconPackManager.createDefaultDirectory();
-    await this.checkRecentlyUsedIcons();
+    // 这一段会读写文件系统，因此整体受保护：任何一步失败都不应让 Obsidian 把插件
+    // 整个判为「加载失败」。移动端（尤其外置存储）无法建目录、无法列举是常见情况，
+    // 正确结果是「暂时没有图标包」，而不是插件不可用。
+    //
+    // This section touches the file system, so it is guarded as a whole: no single step
+    // may make Obsidian report the plugin as failed to load. On mobile — external storage
+    // in particular — refusing to create or list a directory is common, and the honest
+    // outcome is "no icon packs yet", not "plugin unusable".
+    try {
+      await this.iconPackManager.createDefaultDirectory();
+      await this.checkRecentlyUsedIcons();
 
-    await migrate(this);
+      await migrate(this);
 
-    const usedIconNames = this.getUsedIcons();
-    await this.iconPackManager.init();
-    await this.initLazyLoading([...usedIconNames]);
+      const usedIconNames = this.getUsedIcons();
+      await this.iconPackManager.init();
+      await this.initLazyLoading([...usedIconNames]);
+    } catch (error) {
+      console.error(`[${config.PLUGIN_NAME}] Initialisation failed:`, error);
+
+      // 移动端无法打开开发者工具，因此错误必须显示在界面上，否则用户只能看到
+      // Obsidian 的「加载失败」而无从排查。
+      // Mobile has no developer tools, so the error has to be visible in the UI;
+      // otherwise the user only sees Obsidian's "failed to load" with no way to diagnose.
+      new Notice(
+        `[${config.PLUGIN_NAME}] Failed to initialise: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        0,
+      );
+    }
 
     this.app.workspace.onLayoutReady(() => this.handleChangeLayout());
 

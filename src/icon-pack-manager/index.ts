@@ -58,15 +58,56 @@ export class IconPackManager {
    * 这里只建立图标包对象并挂上读取源，不解压任何内容。
    * Only pack objects and their read sources are created here; nothing is unpacked.
    */
+  /**
+   * 列举目录，把「目录不存在」与「列举失败」都当作空目录。
+   * Lists a directory, treating both a missing directory and a failed listing as empty.
+   *
+   * 移动端（尤其外置存储 / scoped storage）可能拒绝创建或列举图标包目录。此处若让异常
+   * 冒出去，会从 `onload` 一路抛出，Obsidian 会把整个插件判为「加载失败」——而正确行为
+   * 应当是「暂时没有图标包」。
+   *
+   * On mobile — external storage with scoped access in particular — the icon packs
+   * directory may not be creatable or listable. Letting that throw out of `onload` makes
+   * Obsidian report the whole plugin as failed to load, when the honest outcome is simply
+   * "no icon packs yet".
+   */
+  private async safeList(
+    path: string,
+  ): Promise<{ files: string[]; folders: string[] }> {
+    try {
+      if (!(await this.plugin.app.vault.adapter.exists(path))) {
+        return { files: [], folders: [] };
+      }
+
+      return await this.plugin.app.vault.adapter.list(path);
+    } catch (error) {
+      logger.warn(`Could not list '${path}' (${error})`);
+      return { files: [], folders: [] };
+    }
+  }
+
+  /**
+   * 判断路径是否存在，失败时按「不存在」处理。
+   * Whether a path exists, treating a failed check as "does not exist".
+   */
+  private async safeExists(path: string): Promise<boolean> {
+    try {
+      return await this.plugin.app.vault.adapter.exists(path);
+    } catch (error) {
+      logger.warn(`Could not check existence of '${path}' (${error})`);
+      return false;
+    }
+  }
+
   public async init(): Promise<void> {
     this.iconPacks = [];
     this.shadowedFolders = new Map();
 
-    if (!(await this.plugin.app.vault.adapter.exists(this.path))) {
+    if (!(await this.safeExists(this.path))) {
       await this.createDefaultDirectory();
     }
 
-    const loadedIconPacks = await this.plugin.app.vault.adapter.list(this.path);
+    const loadedIconPacks = await this.safeList(this.path);
 
     // 归档即保持压缩的图标包。
     for (let i = 0; i < loadedIconPacks.files.length; i++) {
@@ -167,8 +208,23 @@ export class IconPackManager {
     this.shadowedFolders.delete(name);
   }
 
+  /**
+   * 确保图标包目录存在 / Ensures the icon packs directory exists.
+   *
+   * 创建失败不应中断加载：移动端可能不允许在该位置建目录，此时插件仍应可用，
+   * 只是暂时没有图标包。
+   *
+   * A failed creation must not abort loading: mobile platforms may refuse to create the
+   * directory, and the plugin should still load with no packs rather than fail outright.
+   */
   public async createDefaultDirectory(): Promise<void> {
-    await this.fileManager.createDirectory(this.path, '');
+    try {
+      await this.fileManager.createDirectory(this.path, '');
+    } catch (error) {
+      logger.warn(
+        `Could not create the icon packs directory '${this.path}' (${error})`,
+      );
+    }
   }
 
   public addIconPack(iconPack: IconPack): void {
