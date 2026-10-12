@@ -412,7 +412,17 @@ export default class IconizePlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on('delete', (file) => {
         const path = file.path;
+        // 先走原有的单键删除（folder note 双向清理、图标包回收都挂在它身上），
+        // 再连带清掉剩下的子键。顺序不能反：removeFolderIcon 见到键已不在就提前
+        // 返回，那些清理会整个被跳过。
+        //
+        // Single-key removal first (folder-note twin cleanup and icon-pack recycle both
+        // hang off it), then cascade the remaining child keys. Order matters: once the
+        // key is gone removeFolderIcon returns early and those cleanups are skipped.
         this.removeFolderIcon(path);
+        this.removeIconSubtree(path);
+        this.pruneDeadIconKeys();
+        this.saveIconFolderData();
       }),
     );
 
@@ -430,6 +440,12 @@ export default class IconizePlugin extends Plugin {
         }
 
         this.renameFolder(file.path, oldPath);
+        // 改名后对账：搬完子键仍可能有指向旧位置的残留，直接丢弃。
+        //
+        // Reconcile after the rename: a leftover key pointing at the old location is
+        // dead weight, drop it.
+        this.pruneDeadIconKeys();
+        this.saveIconFolderData();
       }),
     );
 
@@ -1285,18 +1301,115 @@ export default class IconizePlugin extends Plugin {
   }
 
   renameFolder(newPath: string, oldPath: string): void {
-    if (!this.data[oldPath] || newPath === oldPath) {
+    if (newPath === oldPath) {
       return;
     }
 
-    Object.defineProperty(
-      this.data,
-      newPath,
-      Object.getOwnPropertyDescriptor(this.data, oldPath),
-    );
-    delete this.data[oldPath];
-    this.saveIconFolderData();
+    let changed = false;
+
+    // 被改名的路径自身。父键不在时也要继续搬子键——否则「父目录没设过图标、
+    // 子目录设过」的场景会在改名时把子键全丢掉。
+    //
+    // The renamed path itself. Keep going even when the parent has no key: otherwise
+    // a parent without an icon that has iconed children loses every child key on rename.
+    if (this.data[oldPath] !== undefined) {
+      Object.defineProperty(
+        this.data,
+        newPath,
+        Object.getOwnPropertyDescriptor(this.data, oldPath),
+      );
+      delete this.data[oldPath];
+      changed = true;
+    }
+
+    // 子路径：Obsidian 对文件夹改名 / 移动只发一条 rename 事件，子文件夹与
+    // folder note 的键必须跟着前缀一起改写，否则全部变成指向旧路径的死键。
+    //
+    // Descendants: Obsidian emits a single rename event for a folder, so every child
+    // folder and folder-note key has to follow the prefix or it becomes a dead key.
+    const oldPrefix = oldPath + '/';
+    const newPrefix = newPath + '/';
+    for (const key of Object.keys(this.data)) {
+      if (key === 'settings') {
+        continue;
+      }
+      if (!key.startsWith(oldPrefix)) {
+        continue;
+      }
+      const successor = newPrefix + key.slice(oldPrefix.length);
+      if (this.data[successor] !== undefined) {
+        // 目标位置已经有图标（改名后被手动重设过）：保留新值，丢掉陈旧源键。
+        //
+        // The target already has an icon (reassigned after the move): keep the newer
+        // value and drop the stale source key.
+        delete this.data[key];
+      } else {
+        Object.defineProperty(
+          this.data,
+          successor,
+          Object.getOwnPropertyDescriptor(this.data, key),
+        );
+        delete this.data[key];
+      }
+      changed = true;
+    }
+
+    if (changed) {
+      this.saveIconFolderData();
+    }
   }
+
+  // ===== PATCHED: 文件夹改动后的三层对账 / Three-layer reconciliation after folder changes =====
+  /**
+   * 删除连带：清掉 `path` 及其所有子键。
+   * Obsidian 删文件夹只发一条 delete 事件，只清单键会留下一串孤儿索引。
+   *
+   * Delete cascade: drop `path` and every key under it. Obsidian emits a single delete
+   * event for a folder, so removing only the folder key would orphan the whole subtree.
+   */
+  private removeIconSubtree(path: string): void {
+    const prefix = path + '/';
+    for (const key of Object.keys(this.data)) {
+      if (key === 'settings') {
+        continue;
+      }
+      if (key === path || key.startsWith(prefix)) {
+        delete this.data[key];
+      }
+    }
+  }
+
+  /**
+   * 对账：丢掉指向不存在路径的索引（找不到的索引直接删）。
+   * 挂在文件夹改动之后而不是启动时全量扫描，避免冷启动 / 移动端去 stat 全库。
+   * 用同步的 `getAbstractFileByPath` 判存在性，不走可能抛错的 adapter 异步探测。
+   *
+   * Reconcile: drop index entries whose paths no longer exist. Runs after folder
+   * changes rather than as a full scan at startup, so cold start / mobile never has
+   * to stat the whole vault. Uses the synchronous `getAbstractFileByPath` so it never
+   * hits the adapter probe that can throw on mobile storage.
+   */
+  private pruneDeadIconKeys(): void {
+    const deadKeys: string[] = [];
+    for (const key of Object.keys(this.data)) {
+      if (key === 'settings') {
+        continue;
+      }
+      if (!this.app.vault.getAbstractFileByPath(key)) {
+        deadKeys.push(key);
+        delete this.data[key];
+      }
+    }
+    // 调试开关下才输出，避免静默行为无法定位。
+    // Only log with the debug switch on, so silent behaviour stays locatable.
+    if (deadKeys.length > 0 && this.getSettings().debugMode) {
+      logger.warn(
+        `[iconize] Dropped ${deadKeys.length} icon key(s) pointing at missing paths:\n` +
+          deadKeys.join('\n'),
+      );
+    }
+  }
+  // ===== END PATCH =====
 
   addIconColor(path: string, iconColor: string): void {
     const pathData = this.getData()[path];
