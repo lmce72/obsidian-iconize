@@ -8,6 +8,49 @@ const getTitleIcon = (leaf: HTMLElement): HTMLElement | null => {
   return leaf.querySelector(`.${config.TITLE_ICON_CLASS}`);
 };
 
+/**
+ * 标题图标元素当前代表的请求序号 / Request sequence the title icon element stands for.
+ *
+ * 内联标题元素会被复用，异步解析结果晚到时必须能判断自己是否已经过期。登记之所以放在本模块，
+ * 是因为「这个元素此刻代表谁」正是本模块的领域：任何一次写入（`add`）或移除（`remove` /
+ * `hide`）都会自动作废在飞的旧结果，调用方无需记得去登记，也就不可能绕过这道闸门。
+ *
+ * The inline title element is reused, so a late async result must be able to tell whether it
+ * has gone stale. The registry lives here because "who does this element stand for right now"
+ * is this module's own domain: every write (`add`) and every removal (`remove` / `hide`)
+ * invalidates in-flight results by itself, so no caller has to remember to register and none
+ * can bypass the gate.
+ */
+const pendingRequests = new WeakMap<HTMLElement, number>();
+let requestSequence = 0;
+
+/**
+ * 为一次异步解析领号 / Takes a ticket for an async resolve.
+ *
+ * 必须在 `await` 之前领号：解析期间发生的任何写入都会让这个号作废。
+ * Must be called before awaiting: any write during the resolve invalidates the ticket.
+ */
+const beginRequest = (inlineTitleEl: HTMLElement): number => {
+  const requestId = ++requestSequence;
+  pendingRequests.set(inlineTitleEl, requestId);
+  return requestId;
+};
+
+/**
+ * 该号是否仍然最新 / Whether the ticket is still the latest one.
+ *
+ * 元素若已被代表另一个文件，则返回 false——晚到的结果必须丢弃，否则标题上显示的就是
+ * 上一个文件的图标。
+ * Returns false once the element stands for another file: the late result must be dropped, or
+ * the title would show the previous file's icon.
+ */
+const isLatestRequest = (
+  inlineTitleEl: HTMLElement,
+  requestId: number,
+): boolean => {
+  return pendingRequests.get(inlineTitleEl) === requestId;
+};
+
 interface Options {
   fontSize?: number;
   /**
@@ -52,6 +95,13 @@ const add = (
   svgElement: string,
   options?: Options,
 ): void => {
+  // 先领号再渲染：即使下面因为元素已摘下而什么都没写，这次调用也宣告了「这个元素现在归我」，
+  // 上一个文件在飞的解析结果因此作废，不会晚一步画到当前文件上。
+  // Take the ticket before rendering: even if nothing is written below because the element is
+  // detached, this call claims the element, so the previous file's in-flight resolve is
+  // invalidated instead of painting itself onto the current file a moment later.
+  beginRequest(inlineTitleEl);
+
   if (!inlineTitleEl.parentElement) {
     return;
   }
@@ -79,11 +129,21 @@ const add = (
   }
 
   titleIcon.classList.add(config.TITLE_ICON_CLASS);
-  // 仅在调用方提供了标识时写入该属性；它只用于异步结果的比对，无标识时不必留下空属性。
-  // Only written when the caller supplies an identifier: it exists to compare async
-  // results against, and an empty attribute would be noise.
+  // 该属性只用于按标识查询图标节点，因此必须与本次渲染的图标同步。
+  // The attribute exists to look icon nodes up by identifier, so it must track the icon
+  // rendered by this very call.
+  //
+  // 元素跨文件复用，上一个文件的标识必须清掉：默认文件图标不代表任何配置，若留着旧标识，
+  // 图标缺失检查会 `querySelectorAll('[data-icon="..."]')` 命中它，把它当成那个图标的容器
+  // 并覆盖掉它的内容。
+  // The element is reused across files, so the previous file's identifier must go: the
+  // default file icon stands for no configuration, and a stale identifier makes the missing
+  // -icon check (`querySelectorAll('[data-icon="..."]')`) match it, treat it as that icon's
+  // container and overwrite its content.
   if (options?.iconName) {
     titleIcon.setAttribute(config.ICON_ATTRIBUTE_NAME, options.iconName);
+  } else {
+    titleIcon.removeAttribute(config.ICON_ATTRIBUTE_NAME);
   }
 
   // 让标题图标可点击以更改图标。/ Make the title icon clickable to change the icon.
@@ -207,10 +267,22 @@ const updateStyle = (inlineTitleEl: HTMLElement, options: Options): void => {
 };
 
 /**
- * Hides the title icon from the provided HTMLElement.
- * @param contentEl HTMLElement to hide the title icon from.
+ * 隐藏标题图标 / Hides the title icon.
+ *
+ * 已无生产调用者：文件没有图标时改为显示默认文件图标，关闭「图标显示在标题」设置时走 `remove`
+ * 彻底移除，「保留节点但不显示」这条语义因此没有出口了。保留它是因为它仍是本模块的公开 API。
+ * No production caller left: a file without an icon now shows the default file icon, and turning
+ * the "icon in title" setting off goes through `remove` instead, so "keep the node but hide it"
+ * no longer has an exit. It stays because it is still part of this module's public API.
+ *
+ * @param inlineTitleEl HTMLElement whose title icon will be hidden.
  */
 const hide = (inlineTitleEl: HTMLElement): void => {
+  // 隐藏同样是一次「这个元素不再展示旧图标」的宣告，在飞的解析结果必须作废。
+  // Hiding also declares that the element no longer shows the old icon, so in-flight resolves
+  // must be invalidated.
+  beginRequest(inlineTitleEl);
+
   if (!inlineTitleEl.parentElement) {
     return;
   }
@@ -224,6 +296,10 @@ const hide = (inlineTitleEl: HTMLElement): void => {
 };
 
 const remove = (inlineTitleEl: HTMLElement): void => {
+  // 移除同样是一次宣告：晚到的解析结果不能把刚摘掉的图标又画回来。
+  // Removing declares the same thing: a late resolve must not paint the icon back.
+  beginRequest(inlineTitleEl);
+
   if (!inlineTitleEl.parentElement) {
     return;
   }
@@ -242,4 +318,6 @@ export default {
   hide,
   remove,
   get: getTitleIcon,
+  beginRequest,
+  isLatestRequest,
 };

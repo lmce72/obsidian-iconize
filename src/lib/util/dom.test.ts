@@ -225,6 +225,7 @@ describe('createIconNode', () => {
   />
   <div
     class="iconize-icon"
+    data-icon="IbTest"
     style="margin: 4px;"
     title="IbTest"
   >
@@ -250,6 +251,7 @@ describe('createIconNode', () => {
   />
   <div
     class="iconize-icon"
+    data-icon="IbTest"
     style="margin: 4px;"
     title="IbTest"
   >

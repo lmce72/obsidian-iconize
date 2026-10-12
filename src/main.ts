@@ -26,6 +26,7 @@ import icon from './lib/icon';
 import BookmarkInternalPlugin from './internal-plugins/bookmark';
 import OutlineInternalPlugin from './internal-plugins/outline';
 import {
+  DEFAULT_FILE_ICON,
   getAllOpenedFiles,
   getFileItemInnerTitleEl,
   getFileItemTitleEl,
@@ -119,15 +120,11 @@ export default class IconizePlugin extends Plugin {
    * While `failed`, saving is refused so defaults never overwrite the user's config.
    */
   private configLoadState: 'ok' | 'missing' | 'failed' = 'missing';
-  /**
-   * 内联标题当前的图标请求序号 / Sequence number of the current icon request per title.
-   *
-   * 内联标题元素跨文件复用，异步解析的结果回来时需要据此判断是否已被更新的请求取代。
-   * The inline title element is reused across files, so an async result needs this to tell
-   * whether a newer request has superseded it.
-   */
-  private titleIconRequest = new WeakMap<HTMLElement, number>();
-  private titleIconRequestSeq = 0;
+  // 标题图标的请求序号登记已下沉到 `lib/icon-title`（元素身份归那个模块管）：
+  // 任何一次写入或移除都会自动作废在飞的旧结果，此处不再持有第二份状态。
+  // The title-icon request registry now lives in `lib/icon-title`, which owns element
+  // identity: every write and removal invalidates in-flight results there, so no second copy
+  // of that state is kept here.
   /**
    * 上次写入配置的内容 / Content of the last config write.
    *
@@ -682,10 +679,28 @@ export default class IconizePlugin extends Plugin {
     // Only remove icon above titles and icon in tabs if no custom rule was found.
     if (!didUpdate) {
       // Refreshes icons above title and icons in tabs.
+      //
+      // 只刷新图标真正变了的那个文件：这次调用只动了 `file.path`（见上面的
+      // `dom.removeIconInPath`），而原实现在**每个**已打开文件上都执行了一遍，于是删掉一个
+      // 文件的图标会连带清空其它笔记的标题图标、并把它们的标签页图标换成默认图标。
+      // Refresh only the file whose icon actually changed: this call only touched
+      // `file.path` (see `dom.removeIconInPath` above), while the original loop ran on
+      // *every* opened file — so removing one file's icon wiped the title icons of the other
+      // notes and replaced their tab icons with the default one as well.
       for (const openedFile of getAllOpenedFiles(this)) {
+        if (openedFile.path !== file.path) {
+          continue;
+        }
+
         if (this.getSettings().iconInTitleEnabled) {
-          titleIcon.remove(
+          // 图标被删除后回落为默认文件图标，而不是什么都不留——这样仍有一个可点击的入口
+          // 可以把图标加回来。
+          // Removing an icon falls back to the default file icon instead of leaving nothing,
+          // so there is still a click target to add one back.
+          this.applyTitleIcon(
             (openedFile.leaf.view as InlineTitleView).inlineTitleEl,
+            undefined,
+            file.path,
           );
         }
         if (this.getSettings().iconInTabsEnabled) {
@@ -827,10 +842,13 @@ export default class IconizePlugin extends Plugin {
                 icon.getByPath(this, file.path) ||
                 getFolderNoteInheritedIcon(this, file.path);
               // ===== END PATCH =====
-              if (!iconNameWithPrefix) {
-                titleIcon.hide(view.inlineTitleEl);
-                return;
-              }
+              // 没有标识也照常往下走：`applyTitleIcon` 会回落到默认文件图标。
+              // A missing identifier still goes through: `applyTitleIcon` falls back to the
+              // default file icon.
+              //
+              // 这里原本是 `hide()` + return。那个 return 会连下面的标签页图标补丁一起跳过。
+              // This used to be `hide()` + return, and that return skipped the tab-icon patch
+              // below along with it.
 
               // Removes the node because the editor markdown content is being rerendered
               // when the content mode changes back to editing.
@@ -874,16 +892,15 @@ export default class IconizePlugin extends Plugin {
               icon.getByPath(this, file.path) ||
               getFolderNoteInheritedIcon(this, file.path);
             // ===== END PATCH =====
-            if (!iconNameWithPrefix) {
-              titleIcon.hide(leaf.inlineTitleEl);
-              return;
-            }
-
+            // 没有标识也照常往下走：`applyTitleIcon` 会回落到默认文件图标。这里原本是
+            // `hide()` + return，而那个 return 在 for 循环内部，会中止同一批里后续叶子的处理。
+            // A missing identifier still goes through: `applyTitleIcon` falls back to the
+            // default file icon. This used to be `hide()` + return, and that return sat inside
+            // the for loop, aborting the leaves that followed in the same batch.
             this.applyTitleIcon(
               leaf.inlineTitleEl,
               iconNameWithPrefix,
               file.path,
-              true,
             );
           }
         }),
@@ -1048,65 +1065,101 @@ export default class IconizePlugin extends Plugin {
 
   // ===== PATCHED: 标题图标按需解析 / Resolve title icons on demand =====
   /**
-   * 把图标加到内联标题上；内存未命中时异步按需解析后再加。
-   * Applies an icon to an inline title, resolving on demand when it is not in memory.
+   * 应用 Obsidian 默认文件图标 / Applies the Obsidian default file icon.
    *
-   * 按需加载下图标可能只在索引中，因此同步查找失败并不代表图标不存在。
+   * 文件没有任何图标时用它占位。所有「无图标出口」共用这一处，点击行为与颜色因此一致。
+   * Stands in when a file has no icon at all; every no-icon exit shares it, so the click
+   * behaviour and the colour stay identical.
+   *
+   * 不传 `color`：`DEFAULT_FILE_ICON` 用 `stroke="currentColor"` 绘制，让它继承内联标题的
+   * 文字色，也避免 folder note 的父文件夹颜色漏到占位图标上。
+   * No `color`: it paints with `stroke="currentColor"`, so it inherits the inline title's text
+   * colour, and a folder note's parent colour cannot leak onto the placeholder.
+   *
+   * 不传 `iconName`：默认图标不代表任何配置，写入 `data-icon` 会让按该属性查询的逻辑
+   *（图标缺失检查）把它误认为某个真图标并覆盖它的内容。
+   * No `iconName`: it stands for no configuration, and writing `data-icon` would make
+   * `[data-icon=...]` queries mistake it for a real icon and overwrite its content.
    */
-  private applyTitleIcon(
+  public applyDefaultTitleIcon(inlineTitleEl: HTMLElement, path: string): void {
+    titleIcon.add(this, inlineTitleEl, DEFAULT_FILE_ICON, {
+      fontSize: calculateInlineTitleSize(),
+      // 点击默认图标即可为这个文件设置图标。
+      // Clicking the default icon sets an icon for this file.
+      path,
+      onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
+    });
+  }
+
+  /**
+   * 标题图标的写入管道 / The write pipeline for title icons.
+   *
+   * 所有把图标写到内联标题上的地方都走这里，由它一次补齐标题图标应有的全部属性：颜色
+   *（该文件的有效颜色）、字号、emoji 风格、path 标识、点击改图标，以及作废在飞的旧请求。
+   * 调用方只需要回答「哪个元素、哪个文件、哪个图标」。
+   * Every place that writes an icon onto an inline title goes through here, which fills in
+   * the whole attribute set a title icon should carry — colour (the file's effective one),
+   * font size, emoji style, path identity, click-to-change — and invalidates stale in-flight
+   * requests. Callers only answer which element, which file, which icon.
+   *
+   * 按需加载下图标可能只在索引中，因此同步查找失败并不代表图标不存在，会在异步解析完成后再写。
+   *
+   * 名字为空、或名字存在却解析不出（图标包被移除、规则指向已删除的图标）时，都回落到默认
+   * 文件图标：标题处的位置始终存在，用户也就始终有一个可点击的入口。
+   * An empty name, and a name that cannot be resolved (pack removed, rule pointing at a
+   * deleted icon), both fall back to the default file icon: the slot on the title always
+   * exists, so the user always has a click target.
+   */
+  public applyTitleIcon(
     inlineTitleEl: HTMLElement,
-    iconNameWithPrefix: string,
+    iconNameWithPrefix: string | undefined,
     path: string,
-    hideWhenMissing = false,
   ): void {
+    // 该文件没有任何图标：用默认文件图标占位。
+    // No icon for this file: stand in the default file icon.
+    if (!iconNameWithPrefix) {
+      this.applyDefaultTitleIcon(inlineTitleEl, path);
+      return;
+    }
+
     // 颜色与标签页图标使用同一来源，folder note 会回退到父文件夹的颜色。
     // Same color source as tab icons; folder notes fall back to their folder's color.
     const color = this.getEffectiveIconColor(path);
 
-    // 为这次请求打上序号：内联标题元素会被复用，异步结果回来时若已有更新的请求，就该丢弃。
-    // 用「当前应当显示哪个图标」的标记来比对是不成立的——切换文件时元素上留着的正是**上一
-    // 个文件**的图标，那会被误判成「用户已切走」，于是新文件的图标永远加不上，
-    // 表现为标题图标不显示。
-    //
-    // Tag this request with a sequence number: the inline title element is reused, so a
-    // result that arrives after a newer request must be dropped. Comparing against the
-    // element's current icon does not work — on a file switch the element still carries the
-    // *previous* file's icon, which reads as "the user moved on" and silently blocks the new
-    // file's icon, leaving no icon above the title at all.
-    const requestId = ++this.titleIconRequestSeq;
-    this.titleIconRequest.set(inlineTitleEl, requestId);
-
     if (emoji.isEmoji(iconNameWithPrefix)) {
-      titleIcon.remove(inlineTitleEl);
-      titleIcon.add(this, inlineTitleEl, iconNameWithPrefix, {
-        fontSize: calculateInlineTitleSize(),
-        color,
-        iconName: iconNameWithPrefix,
-        // 点击标题图标即可更改它的图标。
-        // Clicking the title icon changes its icon.
+      this.writeTitleIcon(
+        inlineTitleEl,
+        iconNameWithPrefix,
         path,
-        onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
-      });
+        color,
+        iconNameWithPrefix,
+      );
       return;
     }
 
     const foundIcon = icon.getIconByName(this, iconNameWithPrefix)?.svgElement;
     if (foundIcon) {
-      titleIcon.remove(inlineTitleEl);
-      titleIcon.add(this, inlineTitleEl, foundIcon, {
-        fontSize: calculateInlineTitleSize(),
-        color,
-        iconName: iconNameWithPrefix,
-        // 点击标题图标即可更改它的图标。
-        // Clicking the title icon changes its icon.
+      this.writeTitleIcon(
+        inlineTitleEl,
+        foundIcon,
         path,
-        onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
-      });
+        color,
+        iconNameWithPrefix,
+      );
       return;
     }
 
     // 图标在索引中但尚未解析：异步取回后再加。
     if (this.iconResolver?.find(iconNameWithPrefix)) {
+      // 领号必须在 await 之前：解析期间发生的任何一次写入都会让这个号作废，晚到的结果于是被
+      // 丢弃，标题上就不会画出上一个文件的图标。登记由 `icon-title` 模块持有，任何写入路径
+      //（包括设置页那两处）都不可能绕过它。
+      // Take the ticket before awaiting: any write during the resolve invalidates it, so a
+      // late result is dropped and the previous file's icon never lands on the title. The
+      // registry lives in `icon-title`, so no write path — the settings ones included — can
+      // bypass it.
+      const requestId = titleIcon.beginRequest(inlineTitleEl);
+
       this.iconResolver
         .resolveSvg(iconNameWithPrefix)
         .then((svgMarkup) => {
@@ -1115,20 +1168,17 @@ export default class IconizePlugin extends Plugin {
           }
           // 已被更新的请求取代（用户切到了别的文件）：丢弃这次结果。
           // Superseded by a newer request (the user moved to another file): drop it.
-          if (this.titleIconRequest.get(inlineTitleEl) !== requestId) {
+          if (!titleIcon.isLatestRequest(inlineTitleEl, requestId)) {
             return;
           }
 
-          titleIcon.remove(inlineTitleEl);
-          titleIcon.add(this, inlineTitleEl, svgMarkup, {
-            fontSize: calculateInlineTitleSize(),
-            color,
-            iconName: iconNameWithPrefix,
-            // 点击标题图标即可更改它的图标。
-            // Clicking the title icon changes its icon.
+          this.writeTitleIcon(
+            inlineTitleEl,
+            svgMarkup,
             path,
-            onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
-          });
+            color,
+            iconNameWithPrefix,
+          );
         })
         .catch((error) =>
           console.error('[Iconize] Failed to resolve title icon:', error),
@@ -1136,9 +1186,48 @@ export default class IconizePlugin extends Plugin {
       return;
     }
 
-    if (hideWhenMissing) {
-      titleIcon.hide(inlineTitleEl);
-    }
+    // 名字存在却解析不出来（图标包被移除、规则指向已删除的图标）：与「没有图标」一样回落到
+    // 默认图标，否则复用元素上会一直留着上一个文件的图标。
+    // Named but unresolvable (pack removed, rule pointing at a deleted icon): falls back like
+    // "no icon", or the previous file's icon would linger on the reused element.
+    this.applyDefaultTitleIcon(inlineTitleEl, path);
+  }
+
+  /**
+   * 管道本体：把图标源连同它应有的全部属性一次写进标题元素。
+   * The pipeline itself: writes an icon source plus the whole attribute set it should carry.
+   *
+   * 三条写入分支（emoji / 内存命中 / 异步解析回来）原本各自拼一遍同样的选项对象，任何一处漏写
+   * 都会表现为「标题上的图标与别处不一致」。选项只在这里定义一次，分支只负责给出图标源。
+   * The three write branches (emoji, memory hit, late resolve) each used to assemble the same
+   * option object, and any omission showed up as a title icon that disagreed with every other
+   * place. The options are defined once here; branches only supply the source.
+   *
+   * `remove` 在前是因为元素会被复用：旧图标必须先摘掉，否则失败路径会把它留在原地。
+   * `remove` comes first because the element is reused: the old icon must go, or a failing
+   * path would leave it behind.
+   *
+   * @param source 图标标记或 emoji / Icon markup or emoji.
+   * @param iconName 数据标识；emoji 与默认图标之外的真实图标才有。
+   *   Data identifier; only real icons have one, emoji and the default icon do not.
+   */
+  private writeTitleIcon(
+    inlineTitleEl: HTMLElement,
+    source: string,
+    path: string,
+    color: string | undefined,
+    iconName?: string,
+  ): void {
+    titleIcon.remove(inlineTitleEl);
+    titleIcon.add(this, inlineTitleEl, source, {
+      fontSize: calculateInlineTitleSize(),
+      color,
+      iconName,
+      // 点击标题图标即可更改它的图标。
+      // Clicking the title icon changes its icon.
+      path,
+      onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
+    });
   }
 
   /**

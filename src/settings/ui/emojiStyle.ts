@@ -5,10 +5,8 @@ import dom from '@lib/util/dom';
 import { FolderIconObject } from '@app/main';
 import iconTabs from '@app/lib/icon-tabs';
 import IconFolderSetting from './iconFolderSetting';
-import titleIcon from '@app/lib/icon-title';
 import { getAllOpenedFiles } from '@app/util';
 import { InlineTitleView } from '@app/@types/obsidian';
-import { calculateInlineTitleSize } from '@app/lib/util/text';
 
 export default class EmojiStyleSetting extends IconFolderSetting {
   public display(): void {
@@ -68,9 +66,14 @@ export default class EmojiStyleSetting extends IconFolderSetting {
                 activeView instanceof MarkdownView &&
                 openedFile.path === path
               ) {
-                titleIcon.add(this.plugin, activeView.inlineTitleEl, iconName, {
-                  fontSize: calculateInlineTitleSize(),
-                });
+                // 走同一条写入管道：emoji 风格按新设置重新转换，其余属性与别处保持一致。
+                // Through the same pipeline, so the emoji style is re-applied per the new
+                // setting and every other attribute stays consistent.
+                this.plugin.applyTitleIcon(
+                  activeView.inlineTitleEl,
+                  iconName,
+                  path,
+                );
               }
             }
           }

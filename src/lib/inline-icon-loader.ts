@@ -42,6 +42,24 @@ export class InlineIconLoader {
    */
   private pendingElements: Map<string, Set<HTMLElement>>;
 
+  /**
+   * 是否有调用方在等重绘 / Whether a caller is waiting on a repaint.
+   *
+   * 只有 `requestIcon` 这条「没有托管节点」的路径才需要重绘：它的调用方（Live Preview 的
+   * 装饰）是同步构建的，图标解析完成后只能靠一次重绘/重排才能显示出来。阅读视图的短代码
+   * 由 `fillElement` 直接填空，不依赖重绘。
+   *
+   * 整篇重绘会摧毁笔记里的交互式组件（输入焦点、滚动锚点、DataviewJS 实例），因此只在确实
+   * 有调用方在等的时候才做。
+   *
+   * Only the `requestIcon` path — which owns no node — needs a repaint: its callers (Live
+   * Preview decorations) are built synchronously and can only show a late icon after a
+   * re-render. Shortcodes in the reading view are filled in place by `fillElement` and depend
+   * on nothing. A full-note repaint tears down interactive components living in a note (input
+   * focus, scroll anchor, DataviewJS instances), so it only runs when a caller waits for it.
+   */
+  private needsRepaint: boolean;
+
   constructor(plugin: IconizePlugin) {
     this.plugin = plugin;
     this.pending = new Set();
@@ -50,6 +68,7 @@ export class InlineIconLoader {
     this.inFlight = false;
     this.batchDelayMs = 60;
     this.pendingElements = new Map();
+    this.needsRepaint = false;
   }
 
   /**
@@ -133,7 +152,17 @@ export class InlineIconLoader {
       return;
     }
 
-    if (this.failed.has(iconId) || this.pending.has(iconId)) {
+    if (this.failed.has(iconId)) {
+      return;
+    }
+
+    // 该图标已在队列里：它可能是被 `fillElement` 那一侧排进来的，但这次请求来自等重绘的
+    // 调用方，所以本批解析完成后仍然要重绘。
+    //
+    // Already queued: it may have been queued by the `fillElement` side, but this request comes
+    // from a caller that waits for a repaint, so the batch still has to repaint.
+    if (this.pending.has(iconId)) {
+      this.needsRepaint = true;
       return;
     }
 
@@ -159,6 +188,7 @@ export class InlineIconLoader {
     }
 
     this.pending.add(iconId);
+    this.needsRepaint = true;
     this.schedule();
   }
 
@@ -188,6 +218,10 @@ export class InlineIconLoader {
 
     const icons = [...this.pending];
     this.pending.clear();
+    // 本批是否需要重绘，必须在遍历前取走：批处理期间新到的请求属于下一批。
+    // Snapshot before the loop: requests arriving during the batch belong to the next one.
+    const needsRepaint = this.needsRepaint;
+    this.needsRepaint = false;
     this.inFlight = true;
 
     let loaded = 0;
@@ -231,8 +265,15 @@ export class InlineIconLoader {
     // next read.
     this.plugin.releaseIconSources();
 
-    // 重新渲染打开的笔记以显示新加载的图标 / Re-render open notes.
-    if (loaded > 0) {
+    // 重新渲染打开的笔记以显示新加载的图标。
+    // 只有等重绘的调用方（Live Preview 装饰）才需要：阅读视图的占位节点已经由
+    // `flushPendingElements` 填好，为一篇阅读视图做整篇重绘只会摧毁它里面的交互式组件。
+    //
+    // Re-render open notes to show loaded icons. Only callers that wait for a repaint (Live
+    // Preview decorations) need this: reading-view placeholders were already filled by
+    // `flushPendingElements`, and a full re-render would only tear down interactive components
+    // inside them.
+    if (loaded > 0 && needsRepaint) {
       this.repaintOpenNotes();
     }
 
@@ -294,6 +335,7 @@ export class InlineIconLoader {
     this.pending.clear();
     this.failed.clear();
     this.pendingElements.clear();
+    this.needsRepaint = false;
     // 不清 `inFlight` 会让加载器重置后永久拒绝调度新批次。
     // Leaving `inFlight` set makes the loader refuse to schedule any further batch.
     this.inFlight = false;

@@ -22,6 +22,23 @@ const removeIconInNode = (el: HTMLElement): void => {
   iconNode.remove();
 };
 
+/**
+ * 清掉节点上的图标身份 / Clears a node's icon identity.
+ *
+ * 与 `applyIconContent` 的登记相对：节点不再由我们绘制时（该路径没有图标、图标被移除），
+ * 身份与悬停提示都必须一并撤掉。留着标记的话，按该属性查询的逻辑（图标缺失检查）会把这个
+ * 节点当成那个图标的容器，把它覆盖回去——显示的就不是当前文件该有的东西了。
+ *
+ * The counterpart of the stamping in `applyIconContent`: once a node is no longer painted by
+ * us (no icon for that path, or the icon was removed), both the identity and the tooltip must
+ * go. Left behind, `[data-icon=...]` queries (the missing-icon check) treat this node as that
+ * icon's container and overwrite it back — showing something other than what it should.
+ */
+const clearIconIdentity = (node: HTMLElement): void => {
+  node.removeAttribute(config.ICON_ATTRIBUTE_NAME);
+  node.removeAttribute('title');
+};
+
 interface RemoveOptions {
   /**
    * The container that will be used to remove the icon. If not defined, it will try to
@@ -92,6 +109,15 @@ const applyIconContent = (
   if (options.applyTitle !== false) {
     node.setAttribute('title', iconName);
   }
+
+  // 写入即登记身份：节点上的标记必须始终与它此刻渲染的图标一致。跨路径复用的节点（标签页
+  // 最典型——同一个标签换文件时节点不变）若留着旧标记，该节点自己的异步结果回来时会因比对
+  // 失败而被丢弃，于是永远停在旧图标上，显示的就不是当前文件了。
+  // Stamping the identity is part of the write: the marker must always match what the node
+  // renders right now. A node reused for another path — the tab header above all, whose node
+  // survives a file switch — that kept a stale marker would fail the comparison when its own
+  // async result arrives and would stay on the old icon, i.e. not the current file's.
+  node.setAttribute(config.ICON_ATTRIBUTE_NAME, iconName);
 };
 
 /**
@@ -132,11 +158,13 @@ const setIconForNode = (
   // 按需加载：图标在索引中但尚未解析时，异步取回后再填充。
   const resolver = plugin.iconResolver;
   if (resolver?.find(iconName)) {
-    // 标记该节点当前代表哪个图标，作为异步回调的比对依据（预览节点没有这个属性）。
+    // 登记该节点当前代表哪个图标，作为异步回调的比对依据。每次请求都必须重写：节点可能已被
+    // 复用去代表另一个图标，保留旧标记会让新图标的解析结果永远被丢弃（「有就不写」正是如此）。
     // Mark what the node currently stands for, so the async callback can compare against it.
-    if (!node.hasAttribute(config.ICON_ATTRIBUTE_NAME)) {
-      node.setAttribute(config.ICON_ATTRIBUTE_NAME, iconName);
-    }
+    // Every request must rewrite it: the node may have been reused for a different icon, and
+    // keeping the old marker makes the new icon's result get dropped forever — which is
+    // exactly what the previous "write only when absent" did.
+    node.setAttribute(config.ICON_ATTRIBUTE_NAME, iconName);
 
     resolver
       .resolve(iconName, { persist: options.persist ?? true })
@@ -262,4 +290,5 @@ export default {
   getIconNodeFromPath,
   removeIconInNode,
   removeIconInPath,
+  clearIconIdentity,
 };

@@ -110,7 +110,7 @@ describe('renderSuggestion', () => {
     suggestionIcon.renderSuggestion('heart_fill', el);
 
     expect(el.innerHTML).toBe(
-      '<span><svg></svg></span> <span>heart_fill</span>',
+      '<span data-icon="heart_fill"><svg></svg></span> <span>heart_fill</span>',
     );
 
     getIconByName.mockRestore();

@@ -10,6 +10,11 @@ You can enable the following setting in the plugin settings:
 
 This will enable the icons above the titles. The icon is taken from the icon of the file.
 This feature works with normal icons and custom rules.
+
+A file without any icon shows Obsidian's default file icon instead, so the spot above the
+title is never empty. Clicking an icon above the title opens the icon picker for that file,
+which is the quickest way to set or replace one.
+
 The size of the icon is aligned to the size of the title. If you want to change the size
 of the icon, you can do so by adding some custom css:
 

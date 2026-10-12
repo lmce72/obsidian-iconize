@@ -67,6 +67,11 @@ const add = async (
   }
 
   // Add icons to tabs if a custom rule is applicable.
+  //
+  // 命中规则时它会成为这个标签页的图标，下面「该路径没有图标」的出口因此不能清身份。
+  // A matching rule becomes this tab's icon, so the no-icon exits below must not clear the
+  // identity in that case.
+  let appliedByRule = false;
   for (const rule of customRule.getSortedRules(plugin)) {
     const isApplicable = await customRule.isApplicable(plugin, rule, filePath);
     if (isApplicable) {
@@ -75,18 +80,33 @@ const add = async (
       });
       // TODO: Refactor to include option to `insertIconToNode` function.
       iconContainer.style.margin = null;
+      appliedByRule = true;
       break;
     }
   }
 
+  // 该路径没有任何 Iconize 图标时，标签页显示的是 Obsidian 自带的图标（或规则图标），
+  // 节点上的身份必须撤掉：标签页节点会被复用去显示另一个文件，留着上一个文件的身份，
+  // 图标缺失检查就会按它把上一个文件的图标画到这个标签页上。
+  // With no Iconize icon for this path the tab shows Obsidian's own icon (or the rule's), so
+  // the identity must go: the tab node is reused for another file, and keeping the previous
+  // file's identity lets the missing-icon check paint that icon back onto this tab.
+  const clearIdentity = (): void => {
+    if (!appliedByRule) {
+      dom.clearIconIdentity(iconContainer);
+    }
+  };
+
   // Add icons to tabs if there is an icon set.
   const iconData = data.find(([dataPath]) => dataPath === filePath);
   if (!iconData) {
+    clearIdentity();
     return;
   }
 
   const value = iconData[1];
   if (typeof value !== 'string' && typeof value !== 'object') {
+    clearIdentity();
     return;
   }
 
@@ -94,6 +114,7 @@ const add = async (
   if (typeof value === 'object') {
     const v = value as FolderIconObject;
     if (v.iconName === null) {
+      clearIdentity();
       return;
     }
     iconName = v.iconName;
@@ -141,6 +162,15 @@ interface RemoveOptions {
  * @param options RemoveOptions for the remove function which can optionally be used.
  */
 const remove = (iconContainer: HTMLElement, options?: RemoveOptions) => {
+  // 无论隐藏还是换成默认图标，节点都已不再代表原来那个图标；身份与悬停提示必须一起撤掉。
+  // 留着的话，按该属性查询的逻辑（图标缺失检查、自定义规则清理）会把这个节点当成那个图标的
+  // 容器并把它覆盖回来——显示的就不是当前文件该有的东西了。
+  // Hidden or replaced by the default icon, the node no longer stands for that icon, and both
+  // the identity and the tooltip must go with it. Left behind, `[data-icon=...]` queries (the
+  // missing-icon check, custom-rule cleanup) treat this node as that icon's container and
+  // overwrite it back — showing something other than what the current file should have.
+  dom.clearIconIdentity(iconContainer);
+
   if (!options?.replaceWithDefaultIcon) {
     // Removes the display of the icon container to remove the icons from the tabs.
     iconContainer.style.display = 'none';

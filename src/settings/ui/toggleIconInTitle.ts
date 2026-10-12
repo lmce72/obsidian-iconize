@@ -1,49 +1,36 @@
 import { DropdownComponent, MarkdownView, Setting } from 'obsidian';
-import { calculateInlineTitleSize } from '@app/lib/util/text';
 import IconFolderSetting from './iconFolderSetting';
 import icon from '@lib/icon';
 import titleIcon from '@lib/icon-title';
 import { InlineTitleView } from '@app/@types/obsidian';
 import { IconInTitlePosition } from '@app/settings/data';
 
-interface UpdateLeavesOptions {
-  /**
-   * Decides whether to enable or disable the icon in the title.
-   */
-  enabled: boolean;
-  /**
-   * If true, removes the icon of the title before re-adding it.
-   * Enabling this option is useful when the icon position is updated and therefore
-   * the DOM needs to be updated.
-   * @default false
-   */
-  removeBeforeReAdd?: boolean;
-}
-
 export default class ToggleIconInTitle extends IconFolderSetting {
   private dropdown: DropdownComponent;
 
-  private updateLeaves(options: UpdateLeavesOptions): void {
+  private updateLeaves(enabled: boolean): void {
     this.plugin.app.workspace.getLeavesOfType('markdown').forEach((leaf) => {
       const view = leaf.view as InlineTitleView;
       if (view instanceof MarkdownView) {
-        const foundIcon = icon.getIconByPath(this.plugin, view.file.path);
-
-        if (foundIcon && options.enabled) {
-          if (options.removeBeforeReAdd) {
-            // Remove the icon before re-adding it. This is needed to update the DOM because
-            // the icon node will be inserted in the beginning inline title node.
-            titleIcon.remove(view.contentEl);
-          }
-
-          const content =
-            typeof foundIcon === 'string' ? foundIcon : foundIcon.svgElement;
-          titleIcon.add(this.plugin, view.inlineTitleEl, content, {
-            fontSize: calculateInlineTitleSize(),
-          });
-        } else {
-          titleIcon.remove(view.contentEl);
+        if (!enabled) {
+          // 用户关掉了「图标显示在标题」：必须彻底移除，不能显示默认图标——被关掉的是
+          // 「标题上的图标」这件事，而不是某一个文件的图标。
+          // The setting itself was turned off: remove entirely rather than show the default
+          // icon — what was disabled is "an icon on the title", not one file's icon.
+          titleIcon.remove(view.inlineTitleEl);
+          return;
         }
+
+        // 走标题图标的写入管道：颜色、字号、emoji 风格、点击改图标与身份闸门一次补齐。
+        // 名字为空或解析不出时，管道自己会回落到默认文件图标。
+        // Through the title-icon pipeline: colour, font size, emoji style, click-to-change and
+        // the identity gate are filled in at once. An empty or unresolvable name falls back to
+        // the default file icon inside the pipeline.
+        this.plugin.applyTitleIcon(
+          view.inlineTitleEl,
+          icon.getByPath(this.plugin, view.file.path),
+          view.file.path,
+        );
       }
     });
   }
@@ -64,7 +51,10 @@ export default class ToggleIconInTitle extends IconFolderSetting {
           this.plugin.getSettings().iconInTitlePosition =
             value as IconInTitlePosition;
           await this.plugin.saveIconFolderData();
-          this.updateLeaves({ enabled: true, removeBeforeReAdd: true });
+          // 位置变了需要重写 DOM，写入管道每次都会先摘掉旧图标再写，因此不必额外声明。
+          // A position change needs the DOM rewritten; the pipeline removes the old icon before
+          // every write, so nothing extra has to be requested here.
+          this.updateLeaves(true);
         });
       })
       .addToggle((toggle) => {
@@ -77,7 +67,7 @@ export default class ToggleIconInTitle extends IconFolderSetting {
 
             this.plugin.getSettings().iconInTitleEnabled = enabled;
             await this.plugin.saveIconFolderData();
-            this.updateLeaves({ enabled });
+            this.updateLeaves(enabled);
           });
       });
   }
