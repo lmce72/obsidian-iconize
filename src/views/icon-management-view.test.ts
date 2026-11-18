@@ -158,10 +158,7 @@ vi.mock('@app/lib/logger', () => ({ logger: { error: vi.fn() } }));
 vi.mock('@app/lib/lazy-loading-integration', () => ({
   indexAndRegisterPack: state.indexPack,
 }));
-import {
-  IconManagementView,
-  openIconManagementView,
-} from './icon-management-view';
+import { IconManagementView } from './icon-management-view';
 
 beforeAll(() => {
   HTMLElement.prototype.addClass = function (...classes) {
@@ -416,69 +413,3 @@ describe('icon pack management view', () => {
   });
 });
 
-describe('openIconManagementView', () => {
-  function workspaceWith(leaves: unknown[]) {
-    const setViewState = vi.fn(async () => {});
-    const revealLeaf = vi.fn(async () => {});
-    const getLeaf = vi.fn(() => ({ setViewState }));
-    const closeSettings = vi.fn();
-    return {
-      workspace: {
-        getLeavesOfType: () => leaves,
-        getLeaf,
-        revealLeaf,
-      },
-      setting: { close: closeSettings },
-      setViewState,
-      revealLeaf,
-      getLeaf,
-      closeSettings,
-    };
-  }
-
-  it('rebuilds a stale leaf left by a workspace restored without the plugin', async () => {
-    const stale = {
-      view: { getViewType: () => 'iconize-icon-management' },
-      setViewState: vi.fn(async () => {}),
-    };
-    const f = workspaceWith([stale]);
-    await openIconManagementView({
-      app: { workspace: f.workspace, setting: f.setting },
-    } as unknown as IconizePlugin);
-
-    expect(stale.setViewState).toHaveBeenCalledWith({
-      type: 'iconize-icon-management',
-      active: true,
-    });
-    expect(f.revealLeaf).toHaveBeenCalledWith(stale);
-    expect(f.getLeaf).not.toHaveBeenCalled();
-    expect(f.closeSettings).toHaveBeenCalledTimes(1);
-  });
-
-  it('reveals an already mounted view without rebuilding it', async () => {
-    const view = { getViewType: () => 'iconize-icon-management' };
-    Object.setPrototypeOf(view, IconManagementView.prototype);
-    const leaf = { view, setViewState: vi.fn(async () => {}) };
-    const f = workspaceWith([leaf]);
-    await openIconManagementView({
-      app: { workspace: f.workspace, setting: f.setting },
-    } as unknown as IconizePlugin);
-
-    expect(leaf.setViewState).not.toHaveBeenCalled();
-    expect(f.revealLeaf).toHaveBeenCalledWith(leaf);
-  });
-
-  it('creates a tab when no leaf of that type exists', async () => {
-    const f = workspaceWith([]);
-    await openIconManagementView({
-      app: { workspace: f.workspace, setting: f.setting },
-    } as unknown as IconizePlugin);
-
-    expect(f.getLeaf).toHaveBeenCalledWith('tab');
-    expect(f.setViewState).toHaveBeenCalledWith({
-      type: 'iconize-icon-management',
-      active: true,
-    });
-    expect(f.revealLeaf).toHaveBeenCalled();
-  });
-});

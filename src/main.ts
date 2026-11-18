@@ -21,7 +21,6 @@ import { IconEditSession } from './ui/icon-edit-session';
 import {
   ICON_MANAGEMENT_VIEW_TYPE,
   IconManagementView,
-  openIconManagementView,
 } from './views/icon-management-view';
 import { DEFAULT_SETTINGS, IconFolderSettings } from '@app/settings/data';
 import { migrate } from '@app/migrations';
@@ -106,6 +105,7 @@ export default class IconizePlugin extends Plugin {
     return this.iconLoadingComplete;
   }
   private notebookNavigator?: NotebookNavigatorIntegration;
+  private settingsUI?: IconFolderSettingsUI;
   private openModals = new Set<Modal>();
   public trackModal(modal: Modal): void {
     this.openModals.add(modal);
@@ -211,10 +211,12 @@ export default class IconizePlugin extends Plugin {
       id: 'open-icon-manager',
       name: '打开图标包管理 / Open icon pack manager',
       callback: () => {
-        void openIconManagementView(this).catch((error: unknown) => {
+        try {
+          this.settingsUI?.openManager();
+        } catch (error) {
           logger.error('Could not open the icon pack manager', undefined, error);
           new Notice('Iconize：无法打开图标包管理。');
-        });
+        }
       },
     });
     this.register(() => {
@@ -566,7 +568,8 @@ export default class IconizePlugin extends Plugin {
       this;
     // ===== END PATCH =====
 
-    this.addSettingTab(new IconFolderSettingsUI(this.app, this));
+    this.settingsUI = new IconFolderSettingsUI(this.app, this);
+    this.addSettingTab(this.settingsUI);
   }
 
   // ===== PATCHED: 按需加载初始化 / Lazy loading initialization =====

@@ -1,4 +1,4 @@
-import { ItemView, Modal, Notice, Setting, WorkspaceLeaf } from 'obsidian';
+import { App, ItemView, Modal, Notice, Setting, WorkspaceLeaf } from 'obsidian';
 import IconizePlugin, { FolderIconObject } from '@app/main';
 import { IconPack } from '@app/icon-pack-manager/icon-pack';
 import { LUCIDE_ICON_PACK_NAME } from '@app/icon-pack-manager/lucide';
@@ -21,27 +21,6 @@ function operationLocks(plugin: IconizePlugin): Set<string> {
     packOperations.set(plugin, locks);
   }
   return locks;
-}
-
-/** 在当前工作区打开或显示管理视图。 / Open or reveal the management view. */
-export async function openIconManagementView(
-  plugin: IconizePlugin,
-): Promise<void> {
-  // 从设置页进入时设置是一层覆盖窗口，不关掉它，新标签页只会被压在下面。
-  // Settings is a full-window overlay; without closing it the new tab opens behind it.
-  (plugin.app as unknown as { setting?: { close(): void } }).setting?.close();
-  const workspace = plugin.app.workspace;
-  const [existing] = workspace.getLeavesOfType(ICON_MANAGEMENT_VIEW_TYPE);
-  if (existing?.view instanceof IconManagementView) {
-    await workspace.revealLeaf(existing);
-    return;
-  }
-  // 插件停用期间恢复的工作区会留下只有类型名的空视图，只 reveal 永远打不开。
-  // A workspace restored while the plugin was disabled keeps a stub view that still
-  // reports this type; revealing it never mounts the real view, so rebuild it.
-  const leaf = existing ?? workspace.getLeaf('tab');
-  await leaf.setViewState({ type: ICON_MANAGEMENT_VIEW_TYPE, active: true });
-  await workspace.revealLeaf(leaf);
 }
 
 class RemovePackModal extends Modal {
@@ -119,7 +98,8 @@ class RemovePackModal extends Modal {
   }
 }
 
-export class IconManagementView extends ItemView {
+/** 图标包管理面板，可挂在设置子页或旧的工作区标签里。 / Panel shared by the settings subpage and the legacy tab. */
+export class IconPackManagerPanel {
   private alive = false;
   private generation = 0;
   private query = '';
@@ -134,32 +114,31 @@ export class IconManagementView extends ItemView {
   };
 
   constructor(
-    leaf: WorkspaceLeaf,
+    private app: App,
     private plugin: IconizePlugin,
-  ) {
-    super(leaf);
-  }
-  getViewType(): string {
-    return ICON_MANAGEMENT_VIEW_TYPE;
-  }
-  getDisplayText(): string {
-    return '图标包管理';
-  }
-  getIcon(): string {
-    return 'package';
-  }
+    private root: HTMLElement,
+    private options: { heading?: boolean } = {},
+  ) {}
+
   private current(generation: number): boolean {
     return this.alive && generation === this.generation;
   }
 
-  async onOpen(): Promise<void> {
+  mount(): void {
     this.alive = true;
     this.generation++;
     this.ready = false;
     this.plugin.getEventEmitter().on('allIconsLoaded', this.onIconsLoaded);
-    this.contentEl.empty();
-    this.contentEl.createEl('p', { text: '正在加载图标包…' });
+    this.root.empty();
+    this.root.createEl('p', { text: '正在加载图标包…' });
     if (this.plugin.isIconLoadingComplete()) this.renderReady();
+  }
+
+  unmount(): void {
+    this.alive = false;
+    this.generation++;
+    this.plugin.getEventEmitter().off('allIconsLoaded', this.onIconsLoaded);
+    this.root.empty();
   }
 
   private renderReady(): void {
@@ -168,14 +147,16 @@ export class IconManagementView extends ItemView {
       this.refresh();
       return;
     }
-    const root = this.contentEl;
+    const root = this.root;
     root.empty();
     if (!this.plugin.getIconPackManager() || !this.plugin.iconResolver) {
       root.createEl('p', { text: '图标包初始化失败，请查看控制台了解详情。' });
       return;
     }
     root.addClass('iconize-pack-management');
-    new Setting(root).setName('图标包管理').setHeading();
+    // 设置子页已有返回标题，不再重复。 / The settings subpage already shows the title.
+    if (this.options.heading !== false)
+      new Setting(root).setName('图标包管理').setHeading();
     new Setting(root)
       .setName('预定义图标包')
       .setDesc('浏览并安装支持的图标包。')
@@ -273,13 +254,6 @@ export class IconManagementView extends ItemView {
     this.refresh();
   }
 
-  async onClose(): Promise<void> {
-    this.alive = false;
-    this.generation++;
-    this.plugin.getEventEmitter().off('allIconsLoaded', this.onIconsLoaded);
-    this.contentEl.empty();
-  }
-
   private async importZip(file: File, generation: number): Promise<void> {
     const name = file.name.slice(0, -4);
     const locks = operationLocks(this.plugin);
@@ -345,18 +319,13 @@ export class IconManagementView extends ItemView {
     }
   }
 
-  /** 同步已打开的视图，不缓存窗口实例。 / Refresh open views without caching them. */
   private refreshAll(): void {
-    for (const leaf of this.app.workspace.getLeavesOfType(
-      ICON_MANAGEMENT_VIEW_TYPE,
-    )) {
-      if (leaf.view instanceof IconManagementView) leaf.view.refresh();
-    }
+    this.refresh();
   }
 
   private refresh(): void {
     if (!this.alive || !this.listEl || !this.moreEl) return;
-    const top = this.contentEl.scrollTop;
+    const top = this.root.scrollTop;
     this.listEl.empty();
     this.moreEl.empty();
     const packs = [...this.plugin.getIconPackManager().getIconPacks()].sort(
@@ -424,12 +393,12 @@ export class IconManagementView extends ItemView {
           }),
         );
     }
-    this.contentEl.scrollTop = top;
+    this.root.scrollTop = top;
   }
 
   private selectFiles(pack: IconPack): void {
     const generation = this.generation;
-    const input = this.contentEl.ownerDocument.createElement('input');
+    const input = this.root.ownerDocument.createElement('input');
     input.type = 'file';
     input.multiple = true;
     input.accept = '.svg,image/svg+xml';
@@ -579,5 +548,43 @@ export class IconManagementView extends ItemView {
       locks.delete(LUCIDE_ICON_PACK_NAME);
       this.refreshAll();
     }
+  }
+}
+
+/** 旧工作区标签的兼容外壳；设置页直接挂载 IconPackManagerPanel。 / Legacy tab wrapper. */
+export class IconManagementView extends ItemView {
+  private panel: IconPackManagerPanel | null = null;
+
+  constructor(
+    leaf: WorkspaceLeaf,
+    private plugin: IconizePlugin,
+  ) {
+    super(leaf);
+  }
+
+  getViewType(): string {
+    return ICON_MANAGEMENT_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return '图标包管理';
+  }
+
+  getIcon(): string {
+    return 'package';
+  }
+
+  async onOpen(): Promise<void> {
+    this.panel = new IconPackManagerPanel(
+      this.app,
+      this.plugin,
+      this.contentEl,
+    );
+    this.panel.mount();
+  }
+
+  async onClose(): Promise<void> {
+    this.panel?.unmount();
+    this.panel = null;
   }
 }

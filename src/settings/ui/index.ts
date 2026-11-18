@@ -1,7 +1,6 @@
-import { App, Notice, PluginSettingTab } from 'obsidian';
-import { logger } from '@app/lib/logger';
+import { App, PluginSettingTab, setIcon } from 'obsidian';
 import IconizePlugin from '@app/main';
-import { openIconManagementView } from '@app/views/icon-management-view';
+import { IconPackManagerPanel } from '@app/views/icon-management-view';
 import CustomIconRuleSetting from './customIconRule';
 import EmojiStyleSetting from './emojiStyle';
 import ExtraMarginSetting from './extraMargin';
@@ -28,11 +27,26 @@ import { Setting } from 'obsidian';
 
 export default class IconFolderSettings extends PluginSettingTab {
   private plugin: IconizePlugin;
+  private page: 'main' | 'manager' = 'main';
+  private managerPanel: IconPackManagerPanel | null = null;
 
   constructor(app: App, plugin: IconizePlugin) {
     super(app, plugin);
 
     this.plugin = plugin;
+  }
+
+  /** 供命令面板直接从设置里打开管理页。 / Lets the command open the manager page directly. */
+  openManager(): void {
+    this.page = 'manager';
+    const setting = (
+      this.app as unknown as {
+        setting?: { open(): void; openTabById(id: string): void };
+      }
+    ).setting;
+    setting?.open();
+    setting?.openTabById(this.plugin.manifest.id);
+    this.display();
   }
 
   display(): void {
@@ -45,7 +59,15 @@ export default class IconFolderSettings extends PluginSettingTab {
       element = element.parentElement
     )
       positions.push({ element, top: element.scrollTop });
+    this.managerPanel?.unmount();
+    this.managerPanel = null;
     containerEl.empty();
+
+    if (this.page === 'manager') {
+      this.renderManagerPage(containerEl);
+      for (const { element, top } of positions) element.scrollTop = top;
+      return;
+    }
 
     containerEl.createEl('h1', { text: 'General' });
     new RecentlyUsedIconsSetting(plugin, containerEl).display();
@@ -100,21 +122,55 @@ export default class IconFolderSettings extends PluginSettingTab {
     ).display();
 
     containerEl.createEl('h1', { text: '图标包' });
-    new Setting(containerEl)
-      .setName('管理图标包')
-      .setDesc('浏览、导入和管理已安装的图标包。')
-      .addButton((button) =>
-        button.setButtonText('打开管理视图').onClick(() => {
-          void openIconManagementView(plugin).catch((error: unknown) => {
-            logger.error(
-              'Could not open icon pack management',
-              undefined,
-              error,
-            );
-            new Notice('无法打开图标包管理视图。');
-          });
-        }),
-      );
+    const navigate = new Setting(containerEl)
+      .setName('图标包管理')
+      .setDesc('浏览、导入和管理已安装的图标包。');
+    navigate.settingEl.addClass('iconize-settings-nav');
+    navigate.settingEl.setAttribute('role', 'button');
+    navigate.settingEl.tabIndex = 0;
+    setIcon(
+      navigate.settingEl.createDiv({ cls: 'iconize-settings-nav-chevron' }),
+      'chevron-right',
+    );
+    const openManager = () => {
+      this.page = 'manager';
+      this.display();
+    };
+    navigate.settingEl.addEventListener('click', openManager);
+    navigate.settingEl.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openManager();
+    });
     for (const { element, top } of positions) element.scrollTop = top;
+  }
+
+  /** 设置子页：返回行 + 图标包管理内容。 / Settings subpage with a back row and the manager panel. */
+  private renderManagerPage(containerEl: HTMLElement): void {
+    const back = containerEl.createDiv({ cls: 'iconize-settings-back' });
+    back.setAttribute('role', 'button');
+    back.setAttribute('aria-label', '返回设置');
+    back.tabIndex = 0;
+    setIcon(
+      back.createDiv({ cls: 'iconize-settings-back-icon' }),
+      'chevron-left',
+    );
+    back.createDiv({ text: '图标包管理', cls: 'iconize-settings-back-title' });
+    const goBack = () => {
+      this.page = 'main';
+      this.display();
+    };
+    back.addEventListener('click', goBack);
+    back.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      goBack();
+    });
+
+    const body = containerEl.createDiv({ cls: 'iconize-settings-subpage' });
+    this.managerPanel = new IconPackManagerPanel(this.app, this.plugin, body, {
+      heading: false,
+    });
+    this.managerPanel.mount();
   }
 }

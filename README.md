@@ -52,7 +52,7 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 
 Version 2.14.8 adds a color-aware icon picker, portable document embedding, delayed automatic conversion, configuration recovery, and cooperative search for large icon libraries. The default embed format is a self-contained Base64 SVG image. See [usage and validation notes](docs/development/2026-11-18-icon-workflows.md). Requires Obsidian 1.7.2 or later.
 
-Version 2.14.11 closes the settings window when opening the icon-pack manager, so it opens in the main workspace, and rebuilds stale management tabs.
+Version 2.14.11 moves icon-pack management into a settings subpage: a chevron row opens it in place, with a back row returning to the settings page.
 
 Version 2.14.10 adds a click hint under the preview block in the color editor.
 
