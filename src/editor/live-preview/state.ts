@@ -13,6 +13,7 @@ import {
 } from '@codemirror/state';
 import IconizePlugin from '@app/main';
 import emoji from '@app/emoji';
+import { createIconTagRegex } from '@app/lib/icon-tags';
 
 export type PositionField = StateField<RangeSet<IconPosition>>;
 
@@ -75,10 +76,7 @@ export const buildPositionField = (plugin: IconizePlugin) => {
 
     const text = state.doc.sliceString(0, state.doc.length);
     const identifier = plugin.getSettings().iconIdentifier;
-    const regex = new RegExp(
-      `(${identifier})((\\w{1,64}:\\d{17,18})|(\\w{1,64}))(${identifier})`,
-      'g',
-    );
+    const regex = createIconTagRegex(identifier);
     for (const { 0: rawCode, index: offset } of text.matchAll(regex)) {
       const iconName = rawCode.substring(
         identifier.length,

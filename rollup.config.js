@@ -3,7 +3,6 @@ import { nodeResolve } from '@rollup/plugin-node-resolve';
 import commonjs from '@rollup/plugin-commonjs';
 import alias from '@rollup/plugin-alias';
 import copy from 'rollup-plugin-copy';
-import { obsidianExportPath } from './env.js';
 
 const isProd = process.env.BUILD === 'production';
 
@@ -55,14 +54,14 @@ export default {
         '@lib': 'src/lib',
       },
     }),
-    typescript(),
+    typescript({ tsconfig: './tsconfig.build.json' }),
     nodeResolve({ browser: true }),
     commonjs(),
     copy({
       targets: [
-        { src: './main.js', dest: obsidianExportPath },
-        { src: './manifest.json', dest: obsidianExportPath },
-        { src: './src/styles.css', dest: obsidianExportPath },
+        { src: './main.js', dest: './dist' },
+        { src: './manifest.json', dest: './dist' },
+        { src: './src/styles.css', dest: './dist' },
       ],
       hook: 'writeBundle',
     }),

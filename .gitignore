@@ -28,3 +28,6 @@ docs/.vitepress/cache
 
 # Vitest
 coverage
+
+# Local deployment backups
+.local-backups/

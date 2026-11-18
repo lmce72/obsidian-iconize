@@ -26,7 +26,12 @@ export class IconInTextWidget extends WidgetType {
   }
 
   eq(other: IconInTextWidget) {
-    return other instanceof IconInTextWidget && other.id === this.id;
+    return (
+      other instanceof IconInTextWidget &&
+      other.id === this.id &&
+      other.start === this.start &&
+      other.end === this.end
+    );
   }
 
   private getSize(view: EditorView): number {
@@ -57,6 +62,7 @@ export class IconInTextWidget extends WidgetType {
       attr: {
         'aria-label': this.id,
         'data-icon': this.id,
+        'data-iconize-from': String(this.start),
         'aria-hidden': 'true',
       },
     });

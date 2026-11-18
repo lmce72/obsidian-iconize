@@ -19,5 +19,5 @@ export const migrate = async (plugin: IconizePlugin): Promise<void> => {
   await migrate0004(plugin);
   await migrate0005(plugin);
 
-  await plugin.saveIconFolderData();
+  // Startup only normalizes in memory. Persist together with the next user edit.
 };

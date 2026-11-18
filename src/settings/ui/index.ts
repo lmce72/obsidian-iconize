@@ -22,6 +22,9 @@ import ToggleIconsInLinks from './toggleIconsInLinks';
 import IconIdentifierSetting from './iconIdentifier';
 import DebugMode from './debugMode';
 import UseInternalPlugins from './useInternalPlugins';
+import IconConversionSetting from './iconConversion';
+import ConfigRecoveryModal from '@app/ui/config-recovery-modal';
+import { Setting } from 'obsidian';
 
 export default class IconFolderSettings extends PluginSettingTab {
   private plugin: IconizePlugin;
@@ -34,12 +37,28 @@ export default class IconFolderSettings extends PluginSettingTab {
 
   display(): void {
     const { plugin, containerEl, app } = this;
+    // 重建设置时保留各层滚动位置。 / Preserve scroll positions across settings rebuilds.
+    const positions: Array<{ element: HTMLElement; top: number }> = [];
+    for (
+      let element: HTMLElement | null = containerEl;
+      element;
+      element = element.parentElement
+    )
+      positions.push({ element, top: element.scrollTop });
     containerEl.empty();
 
     containerEl.createEl('h1', { text: 'General' });
     new RecentlyUsedIconsSetting(plugin, containerEl).display();
     new IconPacksPathSetting(plugin, containerEl).display();
     new ConfigFilePathSetting(plugin, containerEl).display();
+    new Setting(containerEl)
+      .setName('配置诊断与恢复 / Configuration recovery')
+      .setDesc(plugin.getConfigurationStatus())
+      .addButton((button) =>
+        button
+          .setButtonText('诊断与恢复 / Diagnose and recover')
+          .onClick(() => new ConfigRecoveryModal(plugin).open()),
+      );
     new IconPacksBackgroundChecker(plugin, containerEl).display();
     new EmojiStyleSetting(plugin, containerEl).display();
     new IconIdentifierSetting(plugin, containerEl).display();
@@ -52,6 +71,7 @@ export default class IconFolderSettings extends PluginSettingTab {
     new InheritFolderNoteIconSetting(plugin, containerEl).display();
     new FrontmatterOptions(plugin, containerEl).display();
     new ToggleIconsInNotes(plugin, containerEl).display();
+    new IconConversionSetting(plugin, containerEl).display();
     new ToggleIconsInLinks(plugin, containerEl).display();
 
     containerEl.createEl('h1', {
@@ -73,5 +93,6 @@ export default class IconFolderSettings extends PluginSettingTab {
     new CustomIconPackSetting(plugin, containerEl, () =>
       this.display(),
     ).display();
+    for (const { element, top } of positions) element.scrollTop = top;
   }
 }

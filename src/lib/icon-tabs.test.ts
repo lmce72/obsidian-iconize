@@ -83,6 +83,20 @@ describe('add', () => {
     };
   });
 
+  it('renders frontmatter even when there is no corresponding shared-config entry', async () => {
+    plugin.getData = () => ({});
+    plugin.getFrontmatterIcon = () => ({
+      iconName: 'LiStar',
+      iconColor: 'red',
+    });
+    const container = document.createElement('div');
+    await iconTabs.add(plugin, 'frontmatter.md', container);
+    expect(setIconForNode).toHaveBeenCalledWith(plugin, 'LiStar', container, {
+      color: 'red',
+      shouldApplyAllStyles: true,
+    });
+  });
+
   it('should only call `dom.setIconForNode` if `options.iconName` is set', async () => {
     const iconContainer = document.createElement('div');
     await iconTabs.add(plugin, '', iconContainer, {

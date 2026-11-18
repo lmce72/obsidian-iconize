@@ -1,7 +1,6 @@
+import { logger } from '@app/lib/logger';
 import { App, Modal, ColorComponent, ButtonComponent, Notice } from 'obsidian';
 import IconizePlugin from '@app/main';
-import svg from '@app/lib/util/svg';
-import dom from '@app/lib/util/dom';
 
 const PREDEFINED_COLORS = [
   '#272727',
@@ -28,38 +27,31 @@ export default class ChangeColorModal extends Modal {
   constructor(app: App, plugin: IconizePlugin, path: string) {
     super(app);
     this.plugin = plugin;
+    plugin.trackModal(this);
     this.path = path;
 
     this.usedColor = this.plugin.getIconColor(this.path);
 
-    this.contentEl.style.display = 'block';
+    this.contentEl.addClass('iconize-color-content');
     this.modalEl.classList.add('iconize-custom-modal');
     this.titleEl.setText('Change color');
 
-    const description = this.contentEl.createEl('p', {
+    this.contentEl.createEl('p', {
       text: 'Select a color for this icon',
       cls: 'setting-item-description',
     });
-    description.style.marginBottom = 'var(--size-2-2)';
 
-    const predefinedColorsContainer = this.contentEl.createDiv();
-    predefinedColorsContainer.style.display = 'flex';
-    predefinedColorsContainer.style.flexWrap = 'wrap';
-    predefinedColorsContainer.style.gap = 'var(--size-2-1)';
-    predefinedColorsContainer.style.marginBottom = 'var(--size-2-2)';
+    const predefinedColorsContainer = this.contentEl.createDiv({
+      cls: 'iconize-color-palette',
+    });
 
     PREDEFINED_COLORS.forEach((color) => {
       const colorButton = predefinedColorsContainer.createEl('button');
       colorButton.type = 'button';
       colorButton.setAttr('aria-label', `Select ${color} color`);
       colorButton.setAttr('title', color);
-      colorButton.style.width = '20px';
-      colorButton.style.height = '20px';
-      colorButton.style.borderRadius = '50%';
-      colorButton.style.border = '1px solid var(--background-modifier-border)';
-      colorButton.style.backgroundColor = color;
-      colorButton.style.padding = '0';
-      colorButton.style.cursor = 'pointer';
+      colorButton.addClass('iconize-color-swatch');
+      colorButton.setCssProps({ '--iconize-swatch-color': color });
 
       colorButton.addEventListener('click', () => {
         colorPicker.setValue(color);
@@ -72,10 +64,9 @@ export default class ChangeColorModal extends Modal {
 
     this.updateSelectedColor();
 
-    const colorContainer = this.contentEl.createDiv();
-    colorContainer.style.display = 'flex';
-    colorContainer.style.alignItems = 'center';
-    colorContainer.style.justifyContent = 'space-between';
+    const colorContainer = this.contentEl.createDiv({
+      cls: 'iconize-color-controls',
+    });
     const colorPicker = new ColorComponent(colorContainer)
       .setValue(this.usedColor ?? '#000000')
       .onChange((value) => {
@@ -93,39 +84,29 @@ export default class ChangeColorModal extends Modal {
 
     // Save button.
     const button = new ButtonComponent(this.contentEl);
-    button.buttonEl.style.marginTop = 'var(--size-4-4)';
-    button.buttonEl.style.float = 'right';
+    button.buttonEl.addClass('iconize-color-save');
     button.setButtonText('Save Changes');
-    button.onClick(async () => {
-      new Notice('Color of icon changed.');
-
-      if (this.usedColor) {
-        this.plugin.addIconColor(this.path, this.usedColor);
-      } else {
-        this.plugin.removeIconColor(this.path);
-      }
-
-      // Refresh the DOM.
-      const iconNode = dom.getIconNodeFromPath(this.path);
-      iconNode.style.color = this.usedColor ?? null;
-      const colorizedInnerHtml = svg.colorize(
-        iconNode.innerHTML,
-        this.usedColor,
-      );
-      iconNode.innerHTML = colorizedInnerHtml;
-
-      this.close();
+    button.onClick(() => {
+      button.setDisabled(true);
+      void this.plugin
+        .changeIconColor(this.path, this.usedColor)
+        .then(() => {
+          new Notice('Iconize：图标颜色已更新。');
+          this.close();
+        })
+        .catch((error: unknown) => {
+          logger.error('[Iconize] Color update failed:', undefined, error);
+          new Notice('Iconize：颜色保存失败，请检查配置状态。');
+        })
+        .finally(() => button.setDisabled(false));
     });
   }
 
   private updateSelectedColor() {
     this.colorButtons.forEach((button, index) => {
       const color = PREDEFINED_COLORS[index];
-      if (this.usedColor === color) {
-        button.style.border = '2px solid var(--text-normal)';
-      } else {
-        button.style.border = '1px solid var(--background-modifier-border)';
-      }
+      button.toggleClass('is-selected', this.usedColor === color);
+      button.setAttribute('aria-pressed', String(this.usedColor === color));
     });
   }
 
@@ -134,6 +115,7 @@ export default class ChangeColorModal extends Modal {
   }
 
   onClose() {
+    this.plugin.releaseModal(this);
     const { contentEl } = this;
     contentEl.empty();
   }

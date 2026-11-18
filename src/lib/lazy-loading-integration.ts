@@ -216,8 +216,8 @@ async function loadPackIndex(
       );
     }
 
-    pack.setIndex(index);
-    resolver.registerPack(name, index.prefix, index.entries, source);
+    await pack.loadIndex(index);
+    await resolver.registerPack(name, index.prefix, index.entries, source);
 
     return index.entries.length;
   } catch (error) {

@@ -22,6 +22,7 @@ const getTitleIcon = (leaf: HTMLElement): HTMLElement | null => {
  * can bypass the gate.
  */
 const pendingRequests = new WeakMap<HTMLElement, number>();
+const menuHandlers = new WeakMap<HTMLElement, (path: string, event?: MouseEvent) => void>();
 let requestSequence = 0;
 
 /**
@@ -86,7 +87,7 @@ interface Options {
    * A callback rather than opening the picker here: that would make this module depend on
    * the UI layer and form a cycle with main.
    */
-  onClick?: (path: string) => void;
+  onClick?: (path: string, event?: MouseEvent) => void;
 }
 
 const add = (
@@ -158,10 +159,14 @@ const add = (
     titleIcon.dataset.iconizePath = options.path;
   }
   if (options?.onClick) {
-    titleIcon.style.cursor = 'pointer';
+    menuHandlers.set(titleIcon, options.onClick);
+    titleIcon.setAttribute('role', 'button');
+    titleIcon.setAttribute('tabindex', '0');
+    titleIcon.setAttribute('aria-label', '图标菜单 / Icon menu');
+    titleIcon.setAttribute('aria-haspopup', 'menu');
     if (titleIcon.dataset.iconizeClickBound !== '1') {
       titleIcon.dataset.iconizeClickBound = '1';
-      titleIcon.addEventListener('click', (event) => {
+      const openMenu = (event: MouseEvent) => {
         // 阻止冒泡，避免点击被内联标题或编辑器接走（那会把光标移进标题）。
         // Stop propagation so the inline title or editor does not take the click and move
         // the caret into the title.
@@ -169,8 +174,16 @@ const add = (
         event.stopPropagation();
         const path = titleIcon.dataset.iconizePath;
         if (path) {
-          options.onClick?.(path);
+          menuHandlers.get(titleIcon)?.(path, event);
         }
+      };
+      titleIcon.addEventListener('click', openMenu);
+      titleIcon.addEventListener('contextmenu', openMenu);
+      titleIcon.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+        event.preventDefault(); event.stopPropagation();
+        const path = titleIcon.dataset.iconizePath;
+        if (path) menuHandlers.get(titleIcon)?.(path);
       });
     }
   }

@@ -11,17 +11,10 @@ import {
 } from '@app/lib/util/text';
 import IconizePlugin from '@app/main';
 import emoji from '@app/emoji';
+import { createIconTagRegex } from '@app/lib/icon-tags';
 
-export const createIconShortcodeRegex = (plugin: IconizePlugin): RegExp => {
-  return new RegExp(
-    `(${
-      plugin.getSettings().iconIdentifier
-    })((\\w{1,64}:\\d{17,18})|(\\w{1,64}))(${
-      plugin.getSettings().iconIdentifier
-    })`,
-    'g',
-  );
-};
+export const createIconShortcodeRegex = (plugin: IconizePlugin): RegExp =>
+  createIconTagRegex(plugin.getSettings().iconIdentifier);
 
 const createTreeWalker = (
   plugin: IconizePlugin,

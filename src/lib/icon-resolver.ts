@@ -173,12 +173,14 @@ export class IconResolver {
   /**
    * 登记一个图标包的全部条目 / Register every entry of one pack for lookup.
    */
-  registerPack(
+  async registerPack(
     packName: string,
     prefix: string,
     entries: IconEntry[],
     source: IconSource,
-  ): void {
+  ): Promise<void> {
+    let count = 0;
+    let start = performance.now();
     for (const entry of entries) {
       const located: LocatedIcon = { packName, prefix, entry, source };
       this.lookup.set(entry.id.toLowerCase(), located);
@@ -186,6 +188,10 @@ export class IconResolver {
       const nameKey = entry.name.toLowerCase();
       if (!this.lookup.has(nameKey)) {
         this.lookup.set(nameKey, located);
+      }
+      if (++count % 256 === 0 && performance.now() - start >= 8) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        start = performance.now();
       }
     }
   }

@@ -60,6 +60,11 @@ describe('ConsoleLogger', () => {
     );
   });
 
+  it('keeps failures visible when debug logging is disabled', () => {
+    new ConsoleLogger('TestPrefix', false).error('Failure');
+    expect(mockConsole.error).toHaveBeenCalled();
+  });
+
   it('should log with optional parameters', () => {
     const logger = new ConsoleLogger('TestPrefix', true);
     logger.warn('Test message', null, { data: 123 });

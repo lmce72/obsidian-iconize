@@ -250,7 +250,12 @@ const addAll = (
         }
       }
 
-      for (const [dataPath, value] of data) {
+      const displayData = new Map(data);
+      for (const path of Object.keys(fileExplorer.view.fileItems)) {
+        const frontmatter = plugin.getFrontmatterIcon?.(path);
+        if (frontmatter) displayData.set(path, frontmatter);
+      }
+      for (const [dataPath, value] of displayData) {
         const fileItem = fileExplorer.view.fileItems[dataPath];
         if (fileItem) {
           const titleEl = getFileItemTitleEl(fileItem);
@@ -314,6 +319,9 @@ const getByPath = (plugin: IconizePlugin, path: string): string | undefined => {
   if (path === 'settings' || path === 'migrated') {
     return undefined;
   }
+
+  const frontmatter = plugin.getFrontmatterIcon?.(path);
+  if (frontmatter) return frontmatter.iconName;
 
   const value = plugin.getData()[path];
   if (typeof value === 'string') {

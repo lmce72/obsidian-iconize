@@ -118,3 +118,170 @@
   width: 100%;
   margin-right: 0.5rem;
 }
+.iconize-converter-text {
+  display: block;
+  inline-size: 100%;
+  min-block-size: 8rem;
+  margin-block: var(--size-4-2);
+  resize: vertical;
+  font-family: var(--font-monospace);
+}
+
+.iconize-title-icon[role='button'] {
+  cursor: pointer;
+}
+.iconize-title-icon[role='button']:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.iconize-color-content {
+  display: block;
+}
+.iconize-color-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-2-1);
+  margin-block-end: var(--size-2-2);
+}
+.iconize-color-swatch {
+  inline-size: 28px;
+  block-size: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--iconize-swatch-color);
+  padding: 0;
+  cursor: pointer;
+}
+.iconize-color-swatch.is-selected {
+  outline: 2px solid var(--text-normal);
+  outline-offset: 2px;
+}
+.iconize-color-swatch:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.iconize-color-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.iconize-color-save {
+  display: block;
+  margin-block-start: var(--size-4-4);
+  margin-inline-start: auto;
+}
+@media (pointer: coarse) {
+  .iconize-color-swatch {
+    inline-size: 48px;
+    block-size: 48px;
+  }
+}
+
+/* 输入框内清除、外侧选色；预览变量避免每次选色重建 SVG。 / In-field clear and external color control; recolor without rebuilding SVGs. */
+.iconize-picker-search.prompt-input-container {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+}
+.iconize-picker-search .prompt-input {
+  min-inline-size: 0;
+  inline-size: 100%;
+  block-size: 42px;
+  padding-inline: 12px 40px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+}
+.iconize-picker-search .prompt-input:focus-visible {
+  border-color: var(--interactive-accent);
+}
+.iconize-picker-search .search-input-clear-button,
+.iconize-picker-search .prompt-input-cta {
+  display: none;
+}
+.iconize-picker-clear {
+  position: absolute;
+  inset-inline-end: 76px;
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  inline-size: 30px;
+  block-size: 30px;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 22px;
+}
+.iconize-picker-clear[hidden] {
+  display: none;
+}
+.iconize-picker-clear:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.iconize-picker-clear:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+}
+.iconize-picker-color {
+  position: relative;
+  inline-size: 40px;
+  block-size: 40px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--iconize-picker-color, #808080);
+  overflow: hidden;
+}
+.iconize-picker-color:focus-within {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.iconize-picker-color input[type='color'] {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+@media (pointer: coarse), (max-width: 640px) {
+  .iconize-picker-search.prompt-input-container {
+    grid-template-columns: minmax(0, 1fr) 48px;
+    gap: 8px;
+    padding: 8px;
+  }
+  .iconize-picker-search .prompt-input {
+    block-size: 48px;
+    padding-inline-end: 48px;
+  }
+  .iconize-picker-color {
+    inline-size: 48px;
+    block-size: 48px;
+  }
+  .iconize-picker-clear {
+    inline-size: 48px;
+    block-size: 48px;
+    inset-inline-end: 64px;
+  }
+}
+.iconize-preview-colored .iconize-icon-preview {
+  color: var(--iconize-preview-color);
+}
+.iconize-preview-colored .iconize-icon-preview svg[stroke]:not([stroke='none']),
+.iconize-preview-colored
+  .iconize-icon-preview
+  svg
+  [stroke]:not([stroke='none']) {
+  stroke: var(--iconize-preview-color);
+}
+.iconize-preview-colored .iconize-icon-preview svg[fill]:not([fill='none']),
+.iconize-preview-colored .iconize-icon-preview svg [fill]:not([fill='none']) {
+  fill: var(--iconize-preview-color);
+}

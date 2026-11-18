@@ -7,7 +7,7 @@
  * names rather than bytes, and only icons actually used get decompressed.
  */
 
-import { strFromU8, unzipSync } from 'fflate';
+import { ZipDirectory } from './zip-directory';
 import { DataAdapter } from 'obsidian';
 import { logger } from './logger';
 
@@ -55,7 +55,7 @@ export class ZipSource implements IconSource {
    * Raw archive bytes, kept after the first read. A promise so concurrent callers share
    * one read.
    */
-  private archive: Promise<Uint8Array> | null = null;
+  private archive: Promise<ZipDirectory> | null = null;
 
   constructor(
     private readonly adapter: DataAdapter,
@@ -63,11 +63,11 @@ export class ZipSource implements IconSource {
     private readonly extraPath = '',
   ) {}
 
-  private open(): Promise<Uint8Array> {
+  private open(): Promise<ZipDirectory> {
     if (this.archive === null) {
       this.archive = this.adapter
         .readBinary(this.zipPath)
-        .then((buffer) => new Uint8Array(buffer));
+        .then((buffer) => ZipDirectory.open(new Uint8Array(buffer)));
 
       // 读取失败不能缓存，否则之后每次读取都会失败。
       // A failed read must not be cached, otherwise every later read fails too.
@@ -91,18 +91,7 @@ export class ZipSource implements IconSource {
    * what makes the whole scheme work: thousands of names for one directory pass.
    */
   private async listNames(): Promise<string[]> {
-    const bytes = await this.open();
-
-    const names: string[] = [];
-    unzipSync(bytes, {
-      filter: (file) => {
-        if (!file.name.endsWith('/')) {
-          names.push(file.name);
-        }
-        return false;
-      },
-    });
-    return names;
+    return Array.from((await this.open()).entries.keys());
   }
 
   private isSvg(name: string): boolean {
@@ -182,18 +171,7 @@ export class ZipSource implements IconSource {
    */
   public async readEntry(path: string): Promise<string | null> {
     try {
-      const bytes = await this.open();
-
-      const unzipped = unzipSync(bytes, {
-        filter: (file) => file.name === path,
-      });
-      const data = unzipped[path];
-
-      if (!data) {
-        return null;
-      }
-
-      return strFromU8(data);
+      return (await this.open()).read(path);
     } catch (error) {
       logger.error(
         `Could not read '${path}' from '${this.zipPath}' (${error})`,

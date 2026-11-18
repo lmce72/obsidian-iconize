@@ -106,11 +106,10 @@ export class ConsoleLogger implements Logger {
     prefix?: LoggerPrefix,
     ...optionalParams: unknown[]
   ): void {
-    if (this.enabled) {
-      console.error(
-        ...this.formatMessage('error', message, prefix, optionalParams),
-      );
-    }
+    // 错误始终可见，调试开关只控制过程信息。 / Always expose errors; debug controls routine messages only.
+    console.error(
+      ...this.formatMessage('error', message, prefix, optionalParams),
+    );
   }
 
   toggleLogging(enabled: boolean): void {

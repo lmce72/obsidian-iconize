@@ -128,6 +128,7 @@ export default class CustomIconRuleSetting extends IconFolderSetting {
             );
 
             const rule: CustomRule = {
+              color: modal.selectedColor,
               rule: this.textComponent.getValue(),
               icon,
               for: 'everything',
@@ -349,10 +350,12 @@ export default class CustomIconRuleSetting extends IconFolderSetting {
               this.app,
               this.plugin,
               rule.icon,
+              rule.color,
             );
             modal.onChooseItem = async (item) => {
               const icon = typeof item === 'object' ? item.displayName : item;
               rule.icon = icon;
+              rule.color = modal.selectedColor;
               dom.setIconForNode(this.plugin, rule.icon, iconPreviewEl);
               iconPreviewEl.innerHTML = svg.setFontSize(
                 iconPreviewEl.innerHTML,

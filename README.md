@@ -25,28 +25,29 @@ Refer to the official documentation for more information:
 
 ## Development
 
-To customize this project for your needs, you can clone it and then install all dependencies:
-```sh
-$ git clone https://github.com/FlorianWoelki/obsidian-iconize
-$ cd obsidian-iconize
-$ pnpm i
-```
-
-After the installation, you need to create a `env.js` file in the root directory. Fill the file with the following content:
-
-```js
-export const obsidianExportPath =
-  '<path-to-obsidian-vault>/.obsidian/plugins/obsidian-iconize/';
-```
-
-Make sure you create the directory specified in that variable if it does not exist yet.
-
-Afterwards, you can start the rollup dev server by using:
+This local enhanced fork is maintained in `~/obsidian-iconize-enhanced`.
+The installed `obsidian-icon-folder` directory contains build artifacts and user data.
+See [source and deployment](docs/development/local-deployment.md) and
+[configuration safety and recovery](docs/good-to-know/sync-config.md).
 
 ```sh
-$ pnpm dev
+pnpm install
+pnpm exec vitest run
+pnpm run typecheck
+pnpm run build
 ```
 
-This command will automatically build the neccesary files for testing and developing on every change. Furthermore, it does copy all the necessary files to the plugin directory you specified.
+Builds are written to `dist/`. To deploy, copy `env.example.js` to `env.js`, set
+`obsidianExportPath` to the existing `obsidian-icon-folder` directory, and run:
 
-Finally, you can customize the plugin and add it to your plugins.
+```sh
+pnpm run deploy:obsidian
+```
+
+The deploy script backs up the installed runtime, archives obsolete sidecar modules,
+and preserves configuration, icon packs and cache data. All functional changes belong
+in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
+
+## Enhanced icon workflows
+
+Version 2.14.8 adds a color-aware icon picker, portable document embedding, delayed automatic conversion, configuration recovery, and cooperative search for large icon libraries. The default embed format is a self-contained Base64 SVG image. See [usage and validation notes](docs/development/2026-11-18-icon-workflows.md). Requires Obsidian 1.7.2 or later.

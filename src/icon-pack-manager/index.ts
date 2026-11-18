@@ -405,12 +405,65 @@ export class IconPackManager {
   }
 
   public doesIconExists(iconName: string): boolean {
-    return (
-      this.allLoadedIconNames.find(
-        (icon) =>
-          icon.name === iconName || icon.prefix + icon.name === iconName,
-      ) !== undefined
+    if (this.plugin.iconResolver?.find(iconName)) return true;
+    return this.iconPacks.some(
+      (pack) =>
+        !!pack.getEntry(iconName) ||
+        (!pack.getSource() &&
+          pack
+            .getIcons()
+            .some(
+              (icon) =>
+                icon.name === iconName || icon.prefix + icon.name === iconName,
+            )),
     );
+  }
+
+  /** 有界结果、分片让出主线程；过期输入立即取消。 / Bounded, cooperative search with cancellation. */
+  public async searchIcons(
+    query: string,
+    limit = 100,
+    cancelled: () => boolean = () => false,
+  ): Promise<Icon[]> {
+    const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const results: Icon[] = [];
+    const seen = new Set<string>();
+    let sliceStart = performance.now();
+    let count = 0;
+    if (limit <= 0) return results;
+    if (words.length === 1) {
+      for (const pack of this.iconPacks) {
+        if (cancelled()) return [];
+        const exact = pack.findExactIcon(words[0]);
+        if (exact) {
+          const id = exact.prefix + exact.name;
+          results.push({ ...exact, displayName: id });
+          seen.add(id);
+          if (results.length >= limit) return results;
+        }
+      }
+    }
+    for (const pack of this.iconPacks) {
+      const entries = pack.getEntries();
+      const items = entries.length ? entries : pack.getIcons();
+      for (const item of items) {
+        if (cancelled()) return [];
+        const id = pack.getPrefix() + item.name;
+        const haystack =
+          `${id} ${item.displayName} ${pack.getName()}`.toLowerCase();
+        if (!seen.has(id) && words.every((word) => haystack.includes(word))) {
+          const icon = pack.getIcon(item.name);
+          if (icon) results.push({ ...icon, displayName: id });
+          if (results.length >= limit) return results;
+        }
+        // 每 256 项检查时间，单片目标 8ms。 / Check every 256 entries; target 8ms slices.
+        if (++count % 256 === 0 && performance.now() - sliceStart >= 8) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+          sliceStart = performance.now();
+        }
+      }
+    }
+    return cancelled() ? [] : results;
   }
 
   public doesIconPackExist(iconPackName: string): Promise<boolean> {
@@ -419,7 +472,7 @@ export class IconPackManager {
 
   public get allLoadedIconNames(): Icon[] {
     return this.iconPacks.reduce((total: Icon[], iconPack) => {
-      total.push(...iconPack.getIcons());
+      for (const icon of iconPack.iterateIcons()) total.push(icon);
       return total;
     }, []);
   }

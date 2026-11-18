@@ -64,6 +64,14 @@ describe('getByPath', () => {
     };
   });
 
+  it('uses frontmatter for display and falls back to the saved icon after removal', () => {
+    plugin.getFrontmatterIcon = () => ({ iconName: 'LiStar' });
+    expect(icon.getByPath(plugin, 'folder')).toBe('LiStar');
+    plugin.getFrontmatterIcon = () => undefined;
+    expect(icon.getByPath(plugin, 'folder')).toBe('IbTest');
+    expect(plugin.getData().folder).toBe('IbTest');
+  });
+
   it('should return `undefined` when path is `settings` or `migrated', () => {
     expect(icon.getByPath({} as any, 'settings')).toBeUndefined();
     expect(icon.getByPath({} as any, 'migrated')).toBeUndefined();

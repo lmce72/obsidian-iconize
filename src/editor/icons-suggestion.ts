@@ -11,8 +11,11 @@ import emoji from '@app/emoji';
 import dom from '@app/lib/util/dom';
 import { saveIconToIconPack } from '@app/util';
 import IconizePlugin from '@app/main';
+import { escapeRegex } from '@app/lib/icon-tags';
 
 export default class SuggestionIcon extends EditorSuggest<string> {
+  private request = 0;
+
   constructor(
     app: App,
     public plugin: IconizePlugin,
@@ -34,7 +37,7 @@ export default class SuggestionIcon extends EditorSuggest<string> {
 
     // Regex for checking if the shortcode is not done yet.
     const regex = new RegExp(
-      `^(${this.plugin.getSettings().iconIdentifier})\\w+$`,
+      `^(${escapeRegex(this.plugin.getSettings().iconIdentifier)})\\w+$`,
       'g',
     );
     const regexOngoingShortcode = editor
@@ -48,7 +51,7 @@ export default class SuggestionIcon extends EditorSuggest<string> {
 
     const startingIndex = editor
       .getLine(cursor.line)
-      .indexOf(regexOngoingShortcode[0]);
+      .lastIndexOf(regexOngoingShortcode[0], cursor.ch);
 
     return {
       start: {
@@ -63,28 +66,21 @@ export default class SuggestionIcon extends EditorSuggest<string> {
     };
   }
 
-  getSuggestions(context: EditorSuggestContext): string[] {
-    const queryLowerCase = context.query
+  async getSuggestions(context: EditorSuggestContext): Promise<string[]> {
+    const request = ++this.request;
+    const query = context.query
       .substring(this.plugin.getSettings().iconIdentifier.length)
       .toLowerCase();
-
-    // Store all icons corresponding to the current query.
-    const iconsNameArray = this.plugin
+    const icons = await this.plugin
       .getIconPackManager()
-      .allLoadedIconNames.filter((iconObject) => {
-        const name =
-          iconObject.prefix.toLowerCase() + iconObject.name.toLowerCase();
-        return name.toLowerCase().includes(queryLowerCase);
-      })
-      .map((iconObject) => iconObject.prefix + iconObject.name);
-
-    // Store all emojis correspoding to the current query - parsing whitespaces and
-    // colons for shortcodes compatibility.
-    const emojisNameArray = Object.keys(emoji.shortNames).filter((e) =>
-      emoji.getShortcode(e)?.includes(queryLowerCase),
-    );
-
-    return [...iconsNameArray, ...emojisNameArray];
+      .searchIcons(query, 50, () => request !== this.request);
+    if (request !== this.request) return [];
+    const results = icons.map((item) => item.displayName);
+    for (const unicode of Object.keys(emoji.shortNames)) {
+      if (results.length >= 50) break;
+      if (emoji.getShortcode(unicode)?.includes(query)) results.push(unicode);
+    }
+    return results;
   }
 
   renderSuggestion(value: string, el: HTMLElement): void {

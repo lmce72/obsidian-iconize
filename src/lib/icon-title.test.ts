@@ -2,6 +2,36 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import titleIcon from './icon-title';
 import config from '@app/config';
 import svg from './util/svg';
+import type IconizePlugin from '@app/main';
+
+describe('title icon menu interaction', () => {
+  it('uses the current path and handler for click, context menu and keyboard after node reuse', () => {
+    const plugin = {
+      getSettings: () => ({ iconInTitlePosition: 'above' }),
+    } as unknown as IconizePlugin;
+    const parent = document.createElement('div');
+    const title = document.createElement('div');
+    parent.append(title);
+    const oldHandler = vi.fn(),
+      handler = vi.fn();
+    titleIcon.add(plugin, title, '<svg/>', {
+      path: 'Old.md',
+      onClick: oldHandler,
+    });
+    titleIcon.add(plugin, title, '<svg/>', {
+      path: 'New.md',
+      onClick: handler,
+    });
+    const button = parent.querySelector('.iconize-title-icon')!;
+    button.dispatchEvent(new MouseEvent('click'));
+    button.dispatchEvent(new MouseEvent('contextmenu'));
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    expect(oldHandler).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(3);
+    expect(handler.mock.calls.every(([path]) => path === 'New.md')).toBe(true);
+    expect(button.getAttribute('tabindex')).toBe('0');
+  });
+});
 
 describe('add', () => {
   let plugin: any;

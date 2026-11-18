@@ -6,6 +6,9 @@ import {
   requireApiVersion,
   MarkdownView,
   Notice,
+  Menu,
+  Editor,
+  Modal,
 } from 'obsidian';
 import {
   EditorWithEditorComponent,
@@ -32,7 +35,6 @@ import {
   getFileItemTitleEl,
   isHexadecimal,
   removeIconFromIconPack,
-  saveIconToIconPack,
   stringToHex,
 } from '@app/util';
 import config from '@app/config';
@@ -40,6 +42,16 @@ import titleIcon from './lib/icon-title';
 import SuggestionIcon from './editor/icons-suggestion';
 import emoji from './emoji';
 import { IconCache } from './lib/icon-cache';
+import {
+  cloneConfig,
+  ConfigData,
+  equalConfig,
+  mergeConfig,
+  parseConfig,
+  stampConfigChanges,
+  rebaseConfig,
+} from './lib/config-merge';
+import { stateRoot } from './lib/icon-layout';
 import {
   buildIconInLinksPlugin,
   buildIconInTextPlugin,
@@ -56,6 +68,10 @@ import { EventEmitter } from './lib/event/event';
 import IconizeAPI, { getApi } from './lib/api';
 import { Icon, IconPackManager } from './icon-pack-manager';
 import { getNormalizedName } from './icon-pack-manager/util';
+import { IconConversion } from './lib/icon-conversion';
+import { findIconTags } from './lib/icon-tags';
+import IconConverterModal from './ui/icon-converter-modal';
+import ConfigRecoveryModal from './ui/config-recovery-modal';
 // ===== PATCHED: 按需加载系统 / Lazy loading system =====
 import { IconResolver } from './lib/icon-resolver';
 import { InlineIconLoader } from './lib/inline-icon-loader';
@@ -77,6 +93,14 @@ export interface FolderIconObject {
 }
 
 export default class IconizePlugin extends Plugin {
+  public conversion = new IconConversion(this);
+  private openModals = new Set<Modal>();
+  public trackModal(modal: Modal): void {
+    this.openModals.add(modal);
+  }
+  public releaseModal(modal: Modal): void {
+    this.openModals.delete(modal);
+  }
   private data: Record<
     string,
     boolean | string | IconFolderSettings | FolderIconObject
@@ -87,19 +111,6 @@ export default class IconizePlugin extends Plugin {
 
   public positionField: PositionField = buildPositionField(this);
 
-  /**
-   * 记录「图标来自 frontmatter」的路径及其图标名。
-   * Paths whose icon came from frontmatter, mapped to the icon name seen there.
-   *
-   * 只有真正从 frontmatter 取过图标的路径才会被记录。仅凭「文件曾经是活动文件」就记录，
-   * 会让一个从未用过 `icon` 属性的文件在 frontmatter 解析时被误判为「图标已被移除」，
-   * 进而删掉它在 data 里正常配置的图标。
-   *
-   * Only paths that actually supplied an icon from frontmatter are recorded. Recording
-   * a path merely because it was the active file makes the resolver treat a file that
-   * never used the `icon` property as "icon removed" and drop its configured icon.
-   */
-  private frontmatterCache = new Map<string, string>();
   private eventEmitter = new EventEmitter();
 
   private iconPackManager: IconPackManager;
@@ -112,6 +123,22 @@ export default class IconizePlugin extends Plugin {
   public inlineIconLoader?: InlineIconLoader;
   private _saveDebounceTimer: number | null = null;
   private _savePending = false;
+  private initializing = true;
+  private unloading = false;
+  private configBaseline: ConfigData = {};
+  private configVersionBaseline: ConfigData = {};
+  private saveWaiters: Array<() => void> = [];
+  private configRefreshTimer: number | null = null;
+  private configSessionId = Math.random().toString(36).slice(2);
+  private configSaveTask: Promise<void> | null = null;
+  private configSaveSucceeded = true;
+  private configLastSaveError: {
+    stage: string;
+    message: string;
+    at: string;
+  } | null = null;
+  private configHistorySequence = 0;
+  private configRecoveryPending = false;
   private configPath = '.obsidian/plugins/obsidian-icon-folder/data.json';
   /**
    * 配置读取的结果 / Outcome of the last config read.
@@ -120,6 +147,9 @@ export default class IconizePlugin extends Plugin {
    * While `failed`, saving is refused so defaults never overwrite the user's config.
    */
   private configLoadState: 'ok' | 'missing' | 'failed' = 'missing';
+  private configLoadError = '';
+  private configMaintenance = false;
+  private configMaintenanceEpoch = 0;
   // 标题图标的请求序号登记已下沉到 `lib/icon-title`（元素身份归那个模块管）：
   // 任何一次写入或移除都会自动作废在飞的旧结果，此处不再持有第二份状态。
   // The title-icon request registry now lives in `lib/icon-title`, which owns element
@@ -161,8 +191,13 @@ export default class IconizePlugin extends Plugin {
    * message has to be on screen — otherwise the user is left with nothing to diagnose.
    */
   async onload() {
+    this.register(() => {
+      for (const modal of this.openModals) modal.close();
+      this.openModals.clear();
+    });
     try {
       await this.initialize();
+      this.finishConfigInitialization();
     } catch (error) {
       console.error(`[${config.PLUGIN_NAME}] Failed to load:`, error);
       new Notice(
@@ -172,6 +207,15 @@ export default class IconizePlugin extends Plugin {
         0,
       );
     }
+  }
+
+  private finishConfigInitialization(): void {
+    // Only an actual checkpoint merge needs writing; startup normalization is not an edit.
+    if (!this.configRecoveryPending)
+      this._lastSavedConfig = JSON.stringify(this.data, null, 2);
+    this.configVersionBaseline = cloneConfig(this.data);
+    this.initializing = false;
+    if (this.configRecoveryPending) void this.saveIconFolderData();
   }
 
   private async initialize(): Promise<void> {
@@ -207,11 +251,20 @@ export default class IconizePlugin extends Plugin {
         this.setConfigPath(savedConfigPath);
         await this.loadIconFolderData();
       } else {
+        // Never fall back to an old bootstrap copy and later overwrite its pointer.
+        this.setConfigPath(savedConfigPath);
+        this.configLoadState = 'failed';
         console.warn(
-          `[${config.PLUGIN_NAME}] Configured config file '${savedConfigPath}' does not exist; keeping '${this.getConfigPath()}'`,
+          `[${config.PLUGIN_NAME}] Configured config file '${savedConfigPath}' is unavailable; saving is disabled`,
+        );
+        new Notice(
+          `Iconize：配置文件 ${savedConfigPath} 暂不可用，已停止保存，避免退回旧配置。`,
+          0,
         );
       }
     }
+
+    await this.initializeConfigSafety();
 
     logger.toggleLogging(this.getSettings().debugMode);
     this.iconPackManager = new IconPackManager(
@@ -266,6 +319,96 @@ export default class IconizePlugin extends Plugin {
     }
 
     this.app.workspace.onLayoutReady(() => this.handleChangeLayout());
+
+    this.addCommand({
+      id: 'embed-icons-in-note',
+      name: '将文档内的所有 Iconize 标签嵌入实际图标',
+      editorCallback: (editor) => {
+        void this.conversion.convertEditor(editor);
+      },
+    });
+    this.addCommand({
+      id: 'embed-icons-in-vault',
+      name: '将所有带 Iconize 标签的文档嵌入实际图标',
+      callback: () => {
+        void this.conversion.convertVault();
+      },
+    });
+    this.addCommand({
+      id: 'convert-icon-tags-to-svg',
+      name: '转换图标标签至 SVG 图标元素（转换器）',
+      callback: () => new IconConverterModal(this).open(),
+    });
+    this.addCommand({
+      id: 'recover-configuration',
+      name: '配置诊断与恢复 / Diagnose and recover configuration',
+      callback: () => new ConfigRecoveryModal(this).open(),
+    });
+    this.registerEvent(
+      this.app.workspace.on('editor-change', (editor) =>
+        this.conversion.schedule(editor),
+      ),
+    );
+    this.registerEvent(
+      this.app.workspace.on('active-leaf-change', () =>
+        this.conversion.cancelPending(),
+      ),
+    );
+    this.registerEvent(
+      this.app.workspace.on('editor-menu', (menu, editor) =>
+        this.addInlineConversionMenu(menu, editor),
+      ),
+    );
+    this.registerDomEvent(document, 'contextmenu', (event) => {
+      const target = event.target as HTMLElement;
+      const element = target.closest?.('.cm-iconize-icon[data-icon]');
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!element || !view || !view.contentEl.contains(element)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const id = element.getAttribute('data-icon');
+      if (!id) return;
+      const menu = new Menu();
+      menu.addItem((item) =>
+        item
+          .setTitle('转换此图标 / Convert this icon')
+          .setIcon('image')
+          .onClick(() => {
+            // 重复标签按文档中的渲染顺序对应，始终只替换一个。 / Match duplicate widgets by rendered occurrence.
+            const tags = findIconTags(
+              view.editor.getValue(),
+              this.getSettings().iconIdentifier,
+            ).filter((tag) => tag.id === id);
+            const from = element.getAttribute('data-iconize-from');
+            const tag =
+              from !== null
+                ? tags.find((tag) => tag.from === Number(from))
+                : tags.length === 1
+                  ? tags[0]
+                  : undefined;
+            if (tag) void this.conversion.convertEditor(view.editor, tag);
+            else this.openIconOccurrenceMenu(view.editor, id, event);
+          }),
+      );
+      menu.addItem((item) =>
+        item
+          .setTitle('获取 SVG 标签图标')
+          .setIcon('code')
+          .onClick(() =>
+            new IconConverterModal(
+              this,
+              `${this.getSettings().iconIdentifier}${id}${this.getSettings().iconIdentifier}`,
+            ).open(),
+          ),
+      );
+      menu.showAtMouseEvent(event);
+    });
+
+    this.addCommand({
+      id: 'iconize:save-config',
+      name: '手动保存图标配置 / Save icon configuration now',
+      callback: () => this.saveConfigurationNow(),
+    });
 
     this.addCommand({
       id: 'iconize:set-icon-for-file',
@@ -408,46 +551,7 @@ export default class IconizePlugin extends Plugin {
       }),
     );
 
-    // deleting event
-    this.registerEvent(
-      this.app.vault.on('delete', (file) => {
-        const path = file.path;
-        // 先走原有的单键删除（folder note 双向清理、图标包回收都挂在它身上），
-        // 再连带清掉剩下的子键。顺序不能反：removeFolderIcon 见到键已不在就提前
-        // 返回，那些清理会整个被跳过。
-        //
-        // Single-key removal first (folder-note twin cleanup and icon-pack recycle both
-        // hang off it), then cascade the remaining child keys. Order matters: once the
-        // key is gone removeFolderIcon returns early and those cleanups are skipped.
-        this.removeFolderIcon(path);
-        this.removeIconSubtree(path);
-        this.pruneDeadIconKeys();
-        this.saveIconFolderData();
-      }),
-    );
-
-    // renaming event
-    this.registerEvent(
-      this.app.vault.on('rename', (file, oldPath) => {
-        // Check if the file was moved and had an icon before.
-        const dataPoint = this.data[oldPath];
-        if (dataPoint && oldPath !== 'settings') {
-          const iconNameWithPrefix =
-            typeof dataPoint === 'object'
-              ? (dataPoint as FolderIconObject).iconName
-              : (dataPoint as string);
-          dom.createIconNode(this, file.path, iconNameWithPrefix);
-        }
-
-        this.renameFolder(file.path, oldPath);
-        // 改名后对账：搬完子键仍可能有指向旧位置的残留，直接丢弃。
-        //
-        // Reconcile after the rename: a leftover key pointing at the old location is
-        // dead weight, drop it.
-        this.pruneDeadIconKeys();
-        this.saveIconFolderData();
-      }),
-    );
+    this.registerIconPathEvents();
 
     if (this.getSettings().iconsInNotesEnabled) {
       this.registerMarkdownPostProcessor((el) =>
@@ -667,8 +771,8 @@ export default class IconizePlugin extends Plugin {
     });
   }
 
-  private async removeSingleIcon(file: TFile): Promise<void> {
-    this.removeFolderIcon(file.path);
+  private async removeSingleIcon(file: TFile, persist = true): Promise<void> {
+    this.removeFolderIcon(file.path, persist);
     dom.removeIconInPath(file.path);
     IconCache.getInstance().invalidate(file.path);
     this.notifyPlugins();
@@ -762,19 +866,6 @@ export default class IconizePlugin extends Plugin {
         this.eventEmitter.emit('allIconsLoaded');
       })();
 
-      if (this.getSettings().iconInFrontmatterEnabled) {
-        const activeFile = this.app.workspace.getActiveFile();
-        // 只在该文件确实通过 frontmatter 指定了图标时记录，避免误判为「图标已移除」。
-        const frontmatterIcon = activeFile
-          ? this.app.metadataCache.getFileCache(activeFile)?.frontmatter?.[
-              this.getSettings().iconInFrontmatterFieldName
-            ]
-          : undefined;
-        if (activeFile && typeof frontmatterIcon === 'string') {
-          this.frontmatterCache.set(activeFile.path, frontmatterIcon);
-        }
-      }
-
       // Adds the title icon to the active leaf view.
       if (this.getSettings().iconInTitleEnabled) {
         for (const openedFile of getAllOpenedFiles(this)) {
@@ -851,8 +942,7 @@ export default class IconizePlugin extends Plugin {
               this.app.workspace.getActiveViewOfType(MarkdownView);
             if (activeView) {
               const file = activeView.file;
-              const view = (activeView.leaf.view as any).currentMode
-                .view as InlineTitleView;
+              const view = activeView as unknown as InlineTitleView;
               // ===== PATCHED: folder note 继承父文件夹图标 =====
               const iconNameWithPrefix =
                 icon.getByPath(this, file.path) ||
@@ -924,103 +1014,9 @@ export default class IconizePlugin extends Plugin {
 
       // Register event for frontmatter icon registration.
       this.registerEvent(
-        this.app.metadataCache.on('resolve', async (file) => {
-          if (!this.getSettings().iconInFrontmatterEnabled) {
-            return;
-          }
-
-          const fileCache = this.app.metadataCache.getFileCache(file);
-          const iconFrontmatterName =
-            this.getSettings().iconInFrontmatterFieldName;
-          const iconColorFrontmatterName =
-            this.getSettings().iconColorInFrontmatterFieldName;
-          if (fileCache?.frontmatter) {
-            const {
-              [iconFrontmatterName]: newIconName,
-              [iconColorFrontmatterName]: newIconColor,
-            } = fileCache.frontmatter;
-            // If `icon` property is empty, we will remove it from the data and remove the icon.
-            if (!newIconName) {
-              // 只有当这个文件此前确实从 frontmatter 取过图标时才移除；
-              // 否则一个从未用过 `icon` 属性的文件会被误删已配置的图标。
-              // Only remove when this file previously supplied an icon from frontmatter.
-              if (this.frontmatterCache.has(file.path)) {
-                await this.removeSingleIcon(file);
-                this.frontmatterCache.delete(file.path);
-              }
-              return;
-            }
-
-            if (typeof newIconName !== 'string') {
-              new Notice(
-                `[${config.PLUGIN_NAME}] Frontmatter property type \`icon\` has to be of type \`text\`.`,
-              );
-              return;
-            }
-
-            if (newIconColor && typeof newIconColor !== 'string') {
-              new Notice(
-                `[${config.PLUGIN_NAME}] Frontmatter property type \`iconColor\` has to be of type \`text\`.`,
-              );
-              return;
-            }
-
-            let iconColor = newIconColor;
-            if (isHexadecimal(iconColor)) {
-              iconColor = stringToHex(iconColor);
-            }
-
-            const cachedIcon = IconCache.getInstance().get(file.path);
-            if (
-              newIconName === cachedIcon?.iconNameWithPrefix &&
-              iconColor === cachedIcon?.iconColor
-            ) {
-              return;
-            }
-
-            this.frontmatterCache.set(file.path, newIconName);
-            try {
-              if (!emoji.isEmoji(newIconName)) {
-                saveIconToIconPack(this, newIconName);
-              }
-            } catch (e) {
-              logger.warn(
-                `Something went wrong while saving icon to icon pack (error: ${e})`,
-              );
-              new Notice(e.message);
-              return;
-            }
-
-            dom.createIconNode(this, file.path, newIconName, {
-              color: iconColor,
-            });
-            this.addFolderIcon(file.path, newIconName);
-            this.addIconColor(file.path, iconColor);
-            IconCache.getInstance().set(file.path, {
-              iconNameWithPrefix: newIconName,
-              iconColor,
-            });
-
-            // Update icon in tab when setting is enabled.
-            if (this.getSettings().iconInTabsEnabled) {
-              const tabLeaves = iconTabs.getTabLeavesOfFilePath(
-                this,
-                file.path,
-              );
-              for (const tabLeaf of tabLeaves) {
-                iconTabs.update(
-                  this,
-                  newIconName,
-                  tabLeaf.tabHeaderInnerIconEl,
-                );
-              }
-            }
-
-            // Update icon in title when setting is enabled.
-            if (this.getSettings().iconInTitleEnabled) {
-              this.addIconInTitle(newIconName);
-            }
-          }
+        this.app.metadataCache.on('changed', (file) => {
+          if (!this.getSettings().iconInFrontmatterEnabled) return;
+          this.refreshFrontmatterIcon(file);
         }),
       );
 
@@ -1103,7 +1099,8 @@ export default class IconizePlugin extends Plugin {
       // 点击默认图标即可为这个文件设置图标。
       // Clicking the default icon sets an icon for this file.
       path,
-      onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
+      onClick: (clickedPath, event) =>
+        this.openTitleIconMenu(clickedPath, event),
     });
   }
 
@@ -1242,7 +1239,8 @@ export default class IconizePlugin extends Plugin {
       // 点击标题图标即可更改它的图标。
       // Clicking the title icon changes its icon.
       path,
-      onClick: (clickedPath: string) => this.openIconPicker(clickedPath),
+      onClick: (clickedPath, event) =>
+        this.openTitleIconMenu(clickedPath, event),
     });
   }
 
@@ -1275,7 +1273,11 @@ export default class IconizePlugin extends Plugin {
   }
 
   onunload() {
+    this.conversion.dispose();
     console.log('unloading obsidian-icon-folder');
+    this.unloading = true;
+    if (this.configRefreshTimer !== null) clearTimeout(this.configRefreshTimer);
+    if (this.saveWaiters.length) void this.flushConfigSave();
 
     // ===== PATCHED: 清理按需加载系统 / Cleanup lazy loading =====
     if (this.lazyLoadingSystem) {
@@ -1300,6 +1302,55 @@ export default class IconizePlugin extends Plugin {
     // ===== END PATCH =====
   }
 
+  private registerIconPathEvents(): void {
+    // A sync replacement can appear as delete/create. Retain icon assignments
+    // until the user explicitly removes them; temporary absence is not deletion intent.
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        IconCache.getInstance().invalidate(file.path);
+      }),
+    );
+
+    const refreshConfigFile = (file: { path: string }) => {
+      if (file.path === this.getConfigPath()) this.scheduleConfigRefresh();
+    };
+    this.registerEvent(this.app.vault.on('modify', refreshConfigFile));
+    this.registerEvent(
+      this.app.vault.on('create', (file) => {
+        refreshConfigFile(file);
+        if (!this.initializing && this.data[file.path] !== undefined) {
+          window.setTimeout(() => {
+            if (!this.unloading) this._refreshFileExplorerIcon(file.path);
+          }, 0);
+        }
+      }),
+    );
+
+    // renaming event
+    this.registerEvent(
+      this.app.vault.on('rename', (file, oldPath) => {
+        if (
+          file.path === this.getConfigPath() ||
+          oldPath === this.getConfigPath()
+        ) {
+          this.scheduleConfigRefresh();
+          return;
+        }
+        // Check if the file was moved and had an icon before.
+        const dataPoint = this.data[oldPath];
+        if (dataPoint && oldPath !== 'settings') {
+          const iconNameWithPrefix =
+            typeof dataPoint === 'object'
+              ? (dataPoint as FolderIconObject).iconName
+              : (dataPoint as string);
+          dom.createIconNode(this, file.path, iconNameWithPrefix);
+        }
+
+        this.renameFolder(file.path, oldPath);
+      }),
+    );
+  }
+
   renameFolder(newPath: string, oldPath: string): void {
     if (newPath === oldPath) {
       return;
@@ -1313,6 +1364,8 @@ export default class IconizePlugin extends Plugin {
     // The renamed path itself. Keep going even when the parent has no key: otherwise
     // a parent without an icon that has iconed children loses every child key on rename.
     if (this.data[oldPath] !== undefined) {
+      this.recordIconRemoval(oldPath);
+      delete this.getSettings().configRemovals?.[newPath];
       Object.defineProperty(
         this.data,
         newPath,
@@ -1337,6 +1390,8 @@ export default class IconizePlugin extends Plugin {
         continue;
       }
       const successor = newPrefix + key.slice(oldPrefix.length);
+      this.recordIconRemoval(key);
+      delete this.getSettings().configRemovals?.[successor];
       if (this.data[successor] !== undefined) {
         // 目标位置已经有图标（改名后被手动重设过）：保留新值，丢掉陈旧源键。
         //
@@ -1359,74 +1414,81 @@ export default class IconizePlugin extends Plugin {
     }
   }
 
-  // ===== PATCHED: 文件夹改动后的三层对账 / Three-layer reconciliation after folder changes =====
-  /**
-   * 删除连带：清掉 `path` 及其所有子键。
-   * Obsidian 删文件夹只发一条 delete 事件，只清单键会留下一串孤儿索引。
-   *
-   * Delete cascade: drop `path` and every key under it. Obsidian emits a single delete
-   * event for a folder, so removing only the folder key would orphan the whole subtree.
-   */
-  private removeIconSubtree(path: string): void {
-    const prefix = path + '/';
-    for (const key of Object.keys(this.data)) {
-      if (key === 'settings') {
-        continue;
-      }
-      if (key === path || key.startsWith(prefix)) {
-        delete this.data[key];
-      }
-    }
-  }
-
-  /**
-   * 对账：丢掉指向不存在路径的索引（找不到的索引直接删）。
-   * 挂在文件夹改动之后而不是启动时全量扫描，避免冷启动 / 移动端去 stat 全库。
-   * 用同步的 `getAbstractFileByPath` 判存在性，不走可能抛错的 adapter 异步探测。
-   *
-   * Reconcile: drop index entries whose paths no longer exist. Runs after folder
-   * changes rather than as a full scan at startup, so cold start / mobile never has
-   * to stat the whole vault. Uses the synchronous `getAbstractFileByPath` so it never
-   * hits the adapter probe that can throw on mobile storage.
-   */
-  private pruneDeadIconKeys(): void {
-    const deadKeys: string[] = [];
-    for (const key of Object.keys(this.data)) {
-      if (key === 'settings') {
-        continue;
-      }
-      if (!this.app.vault.getAbstractFileByPath(key)) {
-        deadKeys.push(key);
-        delete this.data[key];
-      }
-    }
-    // 调试开关下才输出，避免静默行为无法定位。
-    // Only log with the debug switch on, so silent behaviour stays locatable.
-    if (deadKeys.length > 0 && this.getSettings().debugMode) {
-      logger.warn(
-        `[iconize] Dropped ${deadKeys.length} icon key(s) pointing at missing paths:\n` +
-          deadKeys.join('\n'),
-      );
-    }
-  }
-  // ===== END PATCH =====
-
-  addIconColor(path: string, iconColor: string): void {
+  addIconColor(path: string, iconColor: string, persist = true): void {
     const pathData = this.getData()[path];
+
+    if (!iconColor && typeof pathData === 'string') return;
 
     if (typeof pathData === 'string') {
       this.getData()[path] = {
         iconName: pathData,
         iconColor,
       };
-    } else {
+    } else if (pathData && typeof pathData === 'object') {
       (pathData as FolderIconObject).iconColor = iconColor;
+    } else {
+      this.getData()[path] = {
+        iconName:
+          icon.getByPath(this, path) ||
+          getFolderNoteInheritedIcon(this, path) ||
+          null,
+        iconColor,
+      };
     }
 
-    this.saveIconFolderData();
+    if (persist) this.saveIconFolderData();
+  }
+
+  /** Frontmatter is a display override, never a mutation of saved folder icons. */
+  public getFrontmatterIcon(path: string): FolderIconObject | undefined {
+    if (!this.getSettings().iconInFrontmatterEnabled) return undefined;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return undefined;
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    const name = frontmatter?.[this.getSettings().iconInFrontmatterFieldName];
+    if (typeof name !== 'string' || !name.trim()) return undefined;
+    const color =
+      frontmatter?.[this.getSettings().iconColorInFrontmatterFieldName];
+    return {
+      iconName: name,
+      iconColor:
+        typeof color === 'string'
+          ? isHexadecimal(color)
+            ? stringToHex(color)
+            : color
+          : undefined,
+    };
+  }
+
+  private refreshFrontmatterIcon(file: TFile): void {
+    IconCache.getInstance().invalidate(file.path);
+    this._refreshFileExplorerIcon(file.path);
+    for (const opened of getAllOpenedFiles(this)) {
+      if (opened.path !== file.path) continue;
+      if (this.getSettings().iconInTabsEnabled) {
+        const container = (opened.leaf as TabHeaderLeaf).tabHeaderInnerIconEl;
+        if (icon.getByPath(this, file.path)) {
+          iconTabs.add(this, file.path, container, {
+            iconColor: this.getIconColor(file.path),
+          });
+        } else {
+          iconTabs.remove(container, { replaceWithDefaultIcon: true });
+        }
+      }
+      if (this.getSettings().iconInTitleEnabled) {
+        this.applyTitleIcon(
+          (opened.leaf.view as InlineTitleView).inlineTitleEl,
+          icon.getByPath(this, file.path) ||
+            getFolderNoteInheritedIcon(this, file.path),
+          file.path,
+        );
+      }
+    }
   }
 
   getIconColor(path: string): string | undefined {
+    const frontmatter = this.getFrontmatterIcon(path);
+    if (frontmatter) return frontmatter.iconColor;
     const pathData = this.getData()[path];
 
     if (!pathData) {
@@ -1443,7 +1505,7 @@ export default class IconizePlugin extends Plugin {
   removeIconColor(path: string): void {
     const pathData = this.getData()[path];
 
-    if (typeof pathData === 'string') {
+    if (!pathData || typeof pathData !== 'object') {
       return;
     }
 
@@ -1453,7 +1515,50 @@ export default class IconizePlugin extends Plugin {
     this.saveIconFolderData();
   }
 
-  removeFolderIcon(path: string): void {
+  /** 颜色保存后统一刷新标题、标签页和文件树。 / Refresh every icon surface after a color change. */
+  public async changeIconColor(path: string, color?: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile && this.getFrontmatterIcon(path)) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        const key = this.getSettings().iconColorInFrontmatterFieldName;
+        if (color) frontmatter[key] = color;
+        else delete frontmatter[key];
+      });
+    } else {
+      if (color) this.addIconColor(path, color);
+      else this.removeIconColor(path);
+    }
+    IconCache.getInstance().clear();
+    this._refreshFileExplorerIcon(path);
+    for (const opened of getAllOpenedFiles(this)) {
+      const openedFile = this.app.vault.getAbstractFileByPath(opened.path);
+      if (openedFile instanceof TFile) this.refreshFrontmatterIcon(openedFile);
+    }
+  }
+
+  /** 图标和颜色作为一次选择保存，兼容 frontmatter 覆盖。 / Save icon and color together, including frontmatter overrides. */
+  public async selectIcon(
+    path: string,
+    id: string,
+    color?: string,
+  ): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile && this.getFrontmatterIcon(path)) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        frontmatter[this.getSettings().iconInFrontmatterFieldName] = id;
+        const key = this.getSettings().iconColorInFrontmatterFieldName;
+        if (color) frontmatter[key] = color;
+        else delete frontmatter[key];
+      });
+      this.refreshFrontmatterIcon(file);
+    } else {
+      this.addFolderIcon(path, id);
+      if (color) this.addIconColor(path, color);
+      await this.changeIconColor(path, color);
+    }
+  }
+
+  removeFolderIcon(path: string, persist = true): void {
     if (!this.data[path]) {
       return;
     }
@@ -1473,6 +1578,7 @@ export default class IconizePlugin extends Plugin {
     // Saves the icon name with prefix to remove it from the icon pack directory later.
     const iconData = this.data[path];
 
+    if (persist) this.recordIconRemoval(path);
     delete this.data[path];
 
     // Removes the icon from the icon pack directory if it is not used as an icon somewhere
@@ -1485,7 +1591,7 @@ export default class IconizePlugin extends Plugin {
         iconNameWithPrefix = iconData as string;
       }
 
-      if (!emoji.isEmoji(iconNameWithPrefix)) {
+      if (persist && !emoji.isEmoji(iconNameWithPrefix)) {
         removeIconFromIconPack(this, iconNameWithPrefix);
       }
     }
@@ -1495,16 +1601,16 @@ export default class IconizePlugin extends Plugin {
       this.getSettings().inheritFolderNoteIconEnabled &&
       this.getSettings().bidirectionalFolderNoteIconSyncEnabled
     ) {
-      this._removeSyncedFolderNoteIcon(path);
+      this._removeSyncedFolderNoteIcon(path, persist);
     }
     // ===== END PATCH =====
 
     //this.addIconsToSearch();
-    this.saveIconFolderData();
+    if (persist) this.saveIconFolderData();
   }
 
   // ===== PATCHED: 双向清理：删除对端（folder note 或 folder）的 data.json 记录 =====
-  private _removeSyncedFolderNoteIcon(path: string): void {
+  private _removeSyncedFolderNoteIcon(path: string, persist = true): void {
     if (path.endsWith('.md')) {
       // folder note → 清理父 folder 的记录
       const parentFolder = path.substring(0, path.lastIndexOf('/'));
@@ -1516,6 +1622,7 @@ export default class IconizePlugin extends Plugin {
         return;
       }
       if (this.data[parentFolder]) {
+        if (persist) this.recordIconRemoval(parentFolder);
         delete this.data[parentFolder];
         this._refreshFileExplorerIcon(parentFolder);
       }
@@ -1523,6 +1630,7 @@ export default class IconizePlugin extends Plugin {
       // folder → 清理 folder note 的记录
       const folderNotePath = `${resolveFolderNotePath(this, path)}.md`;
       if (this.data[folderNotePath]) {
+        if (persist) this.recordIconRemoval(folderNotePath);
         delete this.data[folderNotePath];
         this._refreshFileExplorerIcon(folderNotePath);
       }
@@ -1541,18 +1649,10 @@ export default class IconizePlugin extends Plugin {
         if (existingIcon) {
           existingIcon.remove();
         }
-        const value = this.data[path];
         const iconName =
-          typeof value === 'string'
-            ? value
-            : value && typeof value === 'object'
-              ? (value as FolderIconObject).iconName
-              : null;
+          icon.getByPath(this, path) || getFolderNoteInheritedIcon(this, path);
         if (iconName) {
-          const iconColor =
-            typeof value === 'string'
-              ? undefined
-              : (value as FolderIconObject).iconColor;
+          const iconColor = this.getEffectiveIconColor(path);
           const iconNode = titleEl.createDiv();
           iconNode.setAttribute(config.ICON_ATTRIBUTE_NAME, iconName);
           iconNode.classList.add('iconize-icon');
@@ -1565,16 +1665,31 @@ export default class IconizePlugin extends Plugin {
   }
 
   // ===== PATCHED: 双向同步 folder ↔ folder note 图标到 data.json =====
-  private _syncFolderNoteIcon(path: string, iconName: string): void {
+  private _syncFolderNoteIcon(
+    path: string,
+    iconName: string,
+    persist = true,
+  ): void {
+    const stillCurrent = () => {
+      const value = this.data[path];
+      return (
+        !this.unloading &&
+        (typeof value === 'string'
+          ? value
+          : (value as FolderIconObject)?.iconName) === iconName
+      );
+    };
     this.app.vault.adapter
       .stat(path)
       .then((stat) => {
+        if (!stillCurrent()) return;
         if (stat && stat.type === 'folder') {
           // folder → folder note：同步 iconName + iconColor
           const folderNotePath = `${resolveFolderNotePath(this, path)}.md`;
           this.app.vault.adapter
             .exists(folderNotePath)
             .then((exists) => {
+              if (!stillCurrent()) return;
               if (exists) {
                 const folderData = this.data[path];
                 const folderColor =
@@ -1593,7 +1708,10 @@ export default class IconizePlugin extends Plugin {
                       ? { ...existing, iconName }
                       : iconName;
                 }
-                this.saveIconFolderData();
+                if (persist) {
+                  delete this.getSettings().configRemovals?.[folderNotePath];
+                  this.saveIconFolderData();
+                }
                 this._refreshFileExplorerIcon(folderNotePath);
               }
             })
@@ -1630,7 +1748,10 @@ export default class IconizePlugin extends Plugin {
                 ? { ...existing, iconName }
                 : iconName;
           }
-          this.saveIconFolderData();
+          if (persist) {
+            delete this.getSettings().configRemovals?.[parentFolder];
+            this.saveIconFolderData();
+          }
           this._refreshFileExplorerIcon(parentFolder);
         }
       })
@@ -1638,15 +1759,16 @@ export default class IconizePlugin extends Plugin {
   }
   // ===== END PATCH =====
 
-  addFolderIcon(path: string, icon: Icon | string): void {
+  addFolderIcon(path: string, icon: Icon | string, persist = true): void {
     const iconName = getNormalizedName(
       typeof icon === 'object' ? icon.displayName : icon,
     );
 
     this.data[path] = iconName;
+    if (persist) delete this.getSettings().configRemovals?.[path];
 
     // Update recently used icons.
-    if (!this.getSettings().recentlyUsedIcons.includes(iconName)) {
+    if (persist && !this.getSettings().recentlyUsedIcons.includes(iconName)) {
       if (
         this.getSettings().recentlyUsedIcons.length >=
         this.getSettings().recentlyUsedIconsSize
@@ -1659,7 +1781,7 @@ export default class IconizePlugin extends Plugin {
       }
 
       this.getSettings().recentlyUsedIcons.unshift(iconName);
-      this.checkRecentlyUsedIcons();
+      if (persist) this.checkRecentlyUsedIcons();
     }
 
     //this.addIconsToSearch();
@@ -1668,14 +1790,226 @@ export default class IconizePlugin extends Plugin {
       this.getSettings().inheritFolderNoteIconEnabled &&
       this.getSettings().bidirectionalFolderNoteIconSyncEnabled
     ) {
-      this._syncFolderNoteIcon(path, iconName);
+      this._syncFolderNoteIcon(path, iconName, persist);
     }
     // ===== END PATCH =====
-    this.saveIconFolderData();
+    if (persist) this.saveIconFolderData();
   }
 
   public getSettings(): IconFolderSettings {
     return this.data.settings as IconFolderSettings;
+  }
+
+  /** 标题与编辑器使用原生菜单，避免额外 DOM 耦合。 / Native menus keep UI modules decoupled. */
+  public openTitleIconMenu(path: string, event?: MouseEvent): void {
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle('更改图标 / Change icon')
+        .setIcon('image')
+        .onClick(() => this.openIconPicker(path)),
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle('更改图标颜色 / Change icon color')
+        .setIcon('palette')
+        .onClick(() => new ChangeColorModal(this.app, this, path).open()),
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle('获取 SVG 标签图标 / Get SVG icon')
+        .setIcon('code')
+        .onClick(() => {
+          const id =
+            icon.getByPath(this, path) ||
+            getFolderNoteInheritedIcon(this, path);
+          if (!id) {
+            new Notice('Iconize：请先选择图标。');
+            return;
+          }
+          new IconConverterModal(
+            this,
+            `${this.getSettings().iconIdentifier}${id}${this.getSettings().iconIdentifier}`,
+            this.getEffectiveIconColor(path),
+          ).open();
+        }),
+    );
+    if (event) menu.showAtMouseEvent(event);
+    else menu.showAtPosition({ x: 100, y: 100 });
+  }
+
+  private addInlineConversionMenu(menu: Menu, editor: Editor): void {
+    const offset = editor.posToOffset(editor.getCursor());
+    const tag = findIconTags(
+      editor.getValue(),
+      this.getSettings().iconIdentifier,
+    ).find((tag) => tag.from <= offset && tag.to >= offset);
+    if (!tag) return;
+    menu.addItem((item) =>
+      item
+        .setTitle('转换此 Iconize 图标 / Convert icon')
+        .setIcon('image')
+        .onClick(() => {
+          void this.conversion.convertEditor(editor, tag);
+        }),
+    );
+  }
+
+  private openIconOccurrenceMenu(
+    editor: Editor,
+    id: string,
+    event: MouseEvent,
+  ): void {
+    const menu = new Menu();
+    const tags = findIconTags(
+      editor.getValue(),
+      this.getSettings().iconIdentifier,
+    ).filter((tag) => tag.id === id);
+    for (const tag of tags) {
+      const line = editor.offsetToPos(tag.from).line;
+      menu.addItem((item) =>
+        item
+          .setTitle(`第 ${line + 1} 行：${editor.getLine(line).slice(0, 80)}`)
+          .onClick(() => {
+            void this.conversion.convertEditor(editor, tag);
+          }),
+      );
+    }
+    menu.showAtMouseEvent(event);
+  }
+
+  public getConfigurationStatus(): string {
+    const state =
+      this.configLoadState === 'failed'
+        ? '读取失败，已保护原文件并停止保存'
+        : this.configLoadState === 'missing'
+          ? '配置文件尚未创建'
+          : '配置读取正常';
+    return `${state}。路径：${this.getConfigPath()}${this.configLoadError ? `；原因：${this.configLoadError}` : ''}${this.configLastSaveError ? `；最近保存失败：${this.configLastSaveError.message}` : ''}`;
+  }
+
+  public async retryConfiguration(): Promise<void> {
+    // 重试前保留尚未保存的内存状态。 / Preserve unsaved in-memory edits before retrying.
+    await this.withConfigurationMaintenance('before-manual-retry', () =>
+      this.loadIconFolderData(),
+    );
+    if (this.configLoadState === 'ok') {
+      IconCache.getInstance().clear();
+      this.handleChangeLayout();
+      new Notice('Iconize：配置已重新读取，请重新加载插件以应用全部设置。');
+    }
+  }
+
+  public async getConfigurationBackups(): Promise<string[]> {
+    const adapter = this.app.vault.adapter;
+    const paths: string[] = [];
+    if (await adapter.exists(`${this.getConfigPath()}.bak`))
+      paths.push(`${this.getConfigPath()}.bak`);
+    const dir = `${stateRoot(this)}/config-history`;
+    if (await adapter.exists(dir)) {
+      const timestamp = (path: string) =>
+        Number(/-(\d{13})-\d+\.json$/.exec(path)?.[1] ?? 0);
+      paths.push(
+        ...(await adapter.list(dir)).files
+          .filter((path) => path.endsWith('.json'))
+          .sort((a, b) => timestamp(b) - timestamp(a)),
+      );
+    }
+    return paths;
+  }
+
+  private async readConfigurationBackup(path: string): Promise<ConfigData> {
+    if (!(await this.getConfigurationBackups()).includes(path))
+      throw new Error('请选择当前插件提供的备份。');
+    const raw = await this.app.vault.adapter.read(path);
+    if (path === `${this.getConfigPath()}.bak`) return parseConfig(raw);
+    const snapshot: unknown = JSON.parse(raw);
+    if (
+      !snapshot ||
+      typeof snapshot !== 'object' ||
+      !('configPath' in snapshot) ||
+      snapshot.configPath !== this.getConfigPath() ||
+      !('config' in snapshot)
+    )
+      throw new Error('备份对应的配置路径不同，无法恢复。');
+    return parseConfig(JSON.stringify(snapshot.config));
+  }
+
+  public async previewConfigurationBackup(path: string): Promise<string> {
+    const data = await this.readConfigurationBackup(path);
+    return `备份可读，含 ${Object.keys(data).filter((key) => key !== 'settings').length} 条图标配置。点击恢复前将保全当前版本。`;
+  }
+
+  public async restoreConfiguration(path: string): Promise<void> {
+    const data = await this.readConfigurationBackup(path);
+    await this.withConfigurationMaintenance(
+      'before-manual-restore',
+      async (history) => {
+        const adapter = this.app.vault.adapter;
+        const target = this.getConfigPath();
+        const original = (await adapter.exists(target))
+          ? await adapter.read(target)
+          : null;
+        if (original !== null)
+          await adapter.write(`${history}.original`, original);
+        const next = JSON.stringify(
+          {
+            ...data,
+            settings: {
+              ...(data.settings as ConfigData),
+              configFilePath: target,
+            },
+          },
+          null,
+          2,
+        );
+        // 原子比较，避免恢复过程中覆盖同步客户端的新版本。 / Compare atomically against concurrent sync edits.
+        if (original !== null)
+          await adapter.process(target, (current) => {
+            if (current !== original)
+              throw new Error('配置已变化，请重新选择备份后重试。');
+            return next;
+          });
+        else {
+          const slash = target.lastIndexOf('/');
+          if (slash > 0)
+            await this.ensureConfigDirectory(target.slice(0, slash));
+          if (await adapter.exists(target))
+            throw new Error('配置已出现新版本，请重新读取后重试。');
+          await adapter.write(target, next);
+        }
+        await this.loadIconFolderData();
+        await this.updateConfigCheckpoint(this.data);
+        IconCache.getInstance().clear();
+        this.handleChangeLayout();
+      },
+    );
+  }
+
+  /** 暂停保存与同步重读，避免恢复操作与后台写入互相覆盖。 / Serialize recovery against background saves and refreshes. */
+  private async withConfigurationMaintenance(
+    reason: string,
+    action: (history: string) => Promise<void>,
+  ): Promise<void> {
+    if (this.configMaintenance) throw new Error('配置恢复正在进行，请稍候。');
+    this.configMaintenance = true;
+    this.configMaintenanceEpoch = (this.configMaintenanceEpoch ?? 0) + 1;
+    try {
+      if (this._saveDebounceTimer !== null) {
+        clearTimeout(this._saveDebounceTimer);
+        this._saveDebounceTimer = null;
+      }
+      if (this.configRefreshTimer !== null) {
+        clearTimeout(this.configRefreshTimer);
+        this.configRefreshTimer = null;
+      }
+      if (this.configSaveTask) await this.configSaveTask;
+      const history = await this.preserveConfigHistory(reason);
+      await action(history);
+    } finally {
+      this.configMaintenance = false;
+      for (const resolve of this.saveWaiters.splice(0)) resolve();
+    }
   }
 
   // ===== PATCHED: 自定义配置文件路径 / Custom config file path =====
@@ -1684,11 +2018,115 @@ export default class IconizePlugin extends Plugin {
   }
 
   public setConfigPath(newPath: string): void {
+    if (newPath !== this.configPath) {
+      this.configBaseline = {};
+      this.configLoadState = 'missing';
+      this._lastSavedConfig = null;
+      this.configRecoveryPending = false;
+    }
     this.configPath = newPath;
   }
   // ===== END PATCH =====
 
   // ===== PATCHED: 使用自定义配置文件路径读写配置 / Read/write config from custom path =====
+  private recordIconRemoval(path: string): void {
+    const value = this.data[path];
+    if (value === undefined || path === 'settings') return;
+    const removals = (this.getSettings().configRemovals ??= {});
+    Object.defineProperty(removals, path, {
+      value: cloneConfig(value),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  private getConfigCheckpointKey(): string {
+    return `iconize:config-checkpoint:${this.app.vault.getName()}`;
+  }
+
+  /** Unique files cannot overwrite an older recovery version during later saves. */
+  private async preserveConfigHistory(
+    reason: string,
+    incoming?: ConfigData,
+    committed?: ConfigData,
+  ): Promise<string> {
+    const dir = `${stateRoot(this)}/config-history`;
+    await this.ensureConfigDirectory(dir);
+    this.configHistorySequence = (this.configHistorySequence ?? 0) + 1;
+    const path = `${dir}/${this.configSessionId}-${Date.now()}-${this.configHistorySequence}.json`;
+    await this.app.vault.adapter.write(
+      path,
+      JSON.stringify(
+        {
+          schema: 1,
+          createdAt: new Date().toISOString(),
+          configPath: this.getConfigPath(),
+          reason,
+          config: committed ?? this.configBaseline,
+          local: this.data,
+          incoming,
+        },
+        null,
+        2,
+      ),
+    );
+    return path;
+  }
+
+  private async updateConfigCheckpoint(data: ConfigData): Promise<void> {
+    try {
+      const path = await this.preserveConfigHistory(
+        'checkpoint',
+        undefined,
+        data,
+      );
+      // The pointer is device-local; synchronizing another device's files cannot advance it.
+      window.localStorage.setItem(this.getConfigCheckpointKey(), path);
+    } catch (error) {
+      console.error('[Iconize] Could not update config checkpoint:', error);
+      new Notice(
+        'Iconize：无法更新本机恢复检查点，请检查存储权限。历史快照仍保留在 .iconize/config-history。',
+        10000,
+      );
+    }
+  }
+
+  private async initializeConfigSafety(): Promise<void> {
+    if (this.configLoadState !== 'ok') return;
+    try {
+      const path = window.localStorage.getItem(this.getConfigCheckpointKey());
+      if (path?.startsWith(`${stateRoot(this)}/config-history/`)) {
+        // A missing or partial checkpoint must not silently advance the local pointer.
+        const checkpoint = JSON.parse(await this.app.vault.adapter.read(path));
+        if (checkpoint.configPath === this.getConfigPath()) {
+          const trusted = parseConfig(JSON.stringify(checkpoint.config));
+          const merged = mergeConfig(trusted, trusted, this.data);
+          if (!equalConfig(merged, this.data)) {
+            await this.preserveConfigHistory(
+              'startup-missing-icons',
+              this.configBaseline,
+            );
+            this.data = merged as typeof this.data;
+            this.configRecoveryPending = true;
+            new Notice(
+              'Iconize：已与本机检查点取并集合并，逐条保留较新配置，即将自动保存。',
+              0,
+            );
+          }
+          if (equalConfig(trusted, this.data)) return;
+        }
+      }
+      await this.updateConfigCheckpoint(this.data);
+    } catch (error) {
+      console.error('[Iconize] Could not read local config checkpoint:', error);
+      new Notice(
+        'Iconize：本机恢复检查点暂不可读，已保留原指针。请检查 .iconize/config-history 中的历史快照。',
+        10000,
+      );
+    }
+  }
+
   async loadIconFolderData(): Promise<void> {
     try {
       const configPath = this.getConfigPath();
@@ -1696,23 +2134,25 @@ export default class IconizePlugin extends Plugin {
       let data: Record<string, unknown> | null = null;
       if (exists) {
         const raw = await this.app.vault.adapter.read(configPath);
-        data = JSON.parse(raw);
+        data = parseConfig(raw);
         this.configLoadState = 'ok';
       } else {
         this.configLoadState = 'missing';
       }
+      this.configBaseline = cloneConfig(data ?? {});
       if (data) {
         Object.entries(DEFAULT_SETTINGS).forEach(([k, v]) => {
           if (
             (data as { settings?: Record<string, unknown> }).settings?.[k] ===
             undefined
           ) {
-            (data as { settings: Record<string, unknown> }).settings[k] = v;
+            (data as { settings: Record<string, unknown> }).settings[k] =
+              cloneConfig(v);
           }
         });
       }
       this.data = Object.assign(
-        { settings: { ...DEFAULT_SETTINGS } },
+        { settings: cloneConfig(DEFAULT_SETTINGS) },
         {},
         data ?? {},
       ) as Record<
@@ -1720,6 +2160,8 @@ export default class IconizePlugin extends Plugin {
         string | boolean | IconFolderSettings | FolderIconObject
       >;
       this._lastSavedConfig = JSON.stringify(this.data, null, 2);
+      this.configLoadError = '';
+      this.configVersionBaseline = cloneConfig(this.data);
     } catch (error) {
       console.error(
         '[iconize] Failed to load config from',
@@ -1733,111 +2175,363 @@ export default class IconizePlugin extends Plugin {
       // back would erase the user's real config — a sync write in flight, a storage hiccup
       // on mobile, or a half-written JSON file are all enough to trigger it.
       this.configLoadState = 'failed';
-      this.data = { settings: { ...DEFAULT_SETTINGS } };
+      this.configLoadError =
+        error instanceof Error ? error.message : 'Unknown configuration error';
+      this.data = { settings: cloneConfig(DEFAULT_SETTINGS) };
       new Notice(
-        'Icon folder config could not be read. Saving is disabled for this session so the file is not overwritten.',
+        `Iconize：配置读取失败（${this.configLoadError}）。已停止保存。请在设置中打开“配置诊断与恢复”，或运行同名命令。`,
         0,
       );
     }
   }
 
   async saveIconFolderData(): Promise<void> {
-    // 清除现有定时器。
-    if (this._saveDebounceTimer) {
-      clearTimeout(this._saveDebounceTimer);
-    }
-    // 如果正在保存，延迟后重试。
-    if (this._savePending) {
-      return new Promise((resolve) => {
-        this._saveDebounceTimer = window.setTimeout(() => {
-          this.saveIconFolderData().then(resolve);
-        }, 100);
-      });
-    }
+    if (
+      this.initializing ||
+      this.unloading ||
+      this.configMaintenance ||
+      this.configLoadState === 'failed'
+    )
+      return;
+    this.stampLocalConfigChanges();
+    if (JSON.stringify(this.data, null, 2) === this._lastSavedConfig) return;
+    const finished = new Promise<void>((resolve) =>
+      this.saveWaiters.push(resolve),
+    );
+    this.scheduleConfigSave();
+    return finished;
+  }
 
-    // 配置没能读出来时拒绝保存：内存里是默认值，写下去等于清空用户配置。
-    // Refuse to save when the config could not be read: the in-memory data is defaults and
-    // writing it would clear the user's configuration.
-    if (this.configLoadState === 'failed') {
-      console.error(
-        '[iconize] Refusing to save the config: it could not be read, so the in-memory data is not the user data.',
+  private scheduleConfigSave(): void {
+    if (this._savePending) return;
+    if (this.unloading) {
+      void this.flushConfigSave();
+      return;
+    }
+    if (this._saveDebounceTimer !== null) clearTimeout(this._saveDebounceTimer);
+    this._saveDebounceTimer = window.setTimeout(() => {
+      this._saveDebounceTimer = null;
+      void this.flushConfigSave();
+    }, 800);
+  }
+
+  private async readCurrentConfig(): Promise<{
+    raw: string | null;
+    data: ConfigData;
+  }> {
+    const adapter = this.app.vault.adapter;
+    const path = this.getConfigPath();
+    if (!(await adapter.exists(path))) {
+      // A previously present file disappearing can be an in-progress sync replace.
+      if (this.configLoadState === 'ok')
+        throw new Error('Config temporarily missing; saving deferred');
+      return { raw: null, data: {} };
+    }
+    const raw = await adapter.read(path);
+    return { raw, data: parseConfig(raw) };
+  }
+
+  private flushConfigSave(): Promise<void> {
+    if (this.configSaveTask) return this.configSaveTask;
+    const task = this.writeConfigSnapshot();
+    this.configSaveTask = task;
+    void task.finally(() => {
+      this.configSaveTask = null;
+      if (this.saveWaiters.length) this.scheduleConfigSave();
+    });
+    return task;
+  }
+
+  private stampLocalConfigChanges(): void {
+    const stamped = stampConfigChanges(
+      this.configVersionBaseline,
+      this.data,
+      this.configSessionId,
+    );
+    const metadata = (stamped.settings as IconFolderSettings)
+      .configItemVersions;
+    if (metadata) this.getSettings().configItemVersions = metadata;
+    this.configVersionBaseline = cloneConfig(this.data);
+  }
+
+  public async saveConfigurationNow(): Promise<void> {
+    if (
+      this.initializing ||
+      this.unloading ||
+      this.configLoadState === 'failed'
+    ) {
+      new Notice(
+        'Iconize：配置尚未成功加载，无法保存。请检查配置文件后重新加载 Iconize。',
+        8000,
       );
       return;
     }
-
-    this._savePending = true;
+    // A manual save also waits for a write already in flight, then flushes later edits.
+    if (this.configSaveTask) await this.configSaveTask;
     try {
-      const configPath = this.getConfigPath();
-
-      // 内容没变就不写。图标相关的事件很密集，而每一次写都会让同步客户端重新上传，
-      // 在同步仓库里这才是冲突与延迟的主要来源。
-      //
-      // Skip the write when nothing changed. Icon events are frequent, and every write makes
-      // a sync client re-upload the file — which is what actually causes conflicts and lag in
-      // a synced vault.
-      const serialized = JSON.stringify(this.data, null, 2);
-      if (serialized === this._lastSavedConfig) {
-        return;
-      }
-
-      const dir = configPath.substring(0, configPath.lastIndexOf('/'));
-      const dirExists = await this.app.vault.adapter.exists(dir);
-      if (!dirExists) {
-        await this.app.vault.adapter.mkdir(dir);
-      }
-
-      // 写前留一代备份：配置里是用户逐条设置的图标，一旦被误操作清空就无法凭记忆还原。
-      // 只保留一代，因此不会无限堆积。
-      //
-      // Keep one generation of backup: the config holds icons the user set one by one, and a
-      // mistaken action that clears them cannot be reconstructed from memory. Only one
-      // generation is kept, so it cannot pile up.
-      const backupPath = `${configPath}.bak`;
-      try {
-        if (await this.app.vault.adapter.exists(configPath)) {
-          await this.app.vault.adapter.copy(configPath, backupPath);
-        }
-      } catch (error) {
-        console.warn(
-          `[${config.PLUGIN_NAME}] Could not back up the config before writing:`,
-          error,
-        );
-      }
-
-      // 先写临时文件再改名：同步过程或其它进程可能恰好读到写入中途的文件，
-      // 改名是原子的，因此读到的永远是完整内容。
-      //
-      // Write to a temporary file and rename: a sync pass or another process can read the
-      // file mid-write, and a rename is atomic, so readers only ever see complete content.
-      const tmpPath = `${configPath}.tmp`;
-      await this.app.vault.adapter.write(tmpPath, serialized);
-      this._lastSavedConfig = serialized;
-      try {
-        await this.app.vault.adapter.rename(tmpPath, configPath);
-      } catch (renameError) {
-        // 某些适配器可能不支持改名：退回直接写入，并把临时文件清掉。
-        // Some adapters may not support rename: fall back to a direct write and clean up.
-        console.warn(
-          '[iconize] Atomic rename unsupported, writing the config directly:',
-          renameError,
-        );
-        await this.app.vault.adapter.write(configPath, serialized);
-        this._lastSavedConfig = serialized;
-        try {
-          await this.app.vault.adapter.remove(tmpPath);
-        } catch {
-          // 清理失败无关紧要。
-        }
+      const disk = await this.readCurrentConfig();
+      if (!equalConfig(disk.data, this.configBaseline)) {
+        this._lastSavedConfig = null;
       }
     } catch (error) {
       console.error(
-        '[iconize] Failed to save config to',
-        this.getConfigPath(),
+        '[Iconize] Manual config save could not read current config:',
         error,
       );
-      new Notice('Icon folder config save failed');
+      new Notice(
+        'Iconize：当前配置暂不可读，已停止保存并保留内存中的图标。',
+        8000,
+      );
+      return;
+    }
+    const changed =
+      JSON.stringify(this.data, null, 2) !== this._lastSavedConfig;
+    await this.flushConfigSave();
+    if (this.configSaveSucceeded) {
+      new Notice(
+        changed
+          ? `Iconize：图标配置已保存到 ${this.getConfigPath()}`
+          : `Iconize：没有待保存的图标配置改动（${this.getConfigPath()}）`,
+      );
+    }
+  }
+
+  private async writeConfigSnapshot(): Promise<void> {
+    if (this._saveDebounceTimer !== null) {
+      clearTimeout(this._saveDebounceTimer);
+      this._saveDebounceTimer = null;
+    }
+    const waiters = this.saveWaiters.splice(0);
+    this._savePending = true;
+    this.configSaveSucceeded = false;
+    let local: ConfigData | undefined;
+    let stage = '准备配置';
+    try {
+      if (
+        this.initializing ||
+        this.configMaintenance ||
+        this.configLoadState === 'failed'
+      )
+        return;
+      this.stampLocalConfigChanges();
+      if (JSON.stringify(this.data, null, 2) === this._lastSavedConfig) {
+        this.configSaveSucceeded = true;
+        this.configLastSaveError = null;
+        return;
+      }
+      local = cloneConfig(this.data);
+      stage = '读取配置';
+      const disk = await this.readCurrentConfig();
+      stage = '保存历史快照';
+      await this.preserveConfigHistory('before-save', disk.data);
+      const merged = mergeConfig(this.configBaseline, local, disk.data);
+      const serialized = JSON.stringify(merged, null, 2);
+      if (!equalConfig(merged, disk.data)) {
+        const adapter = this.app.vault.adapter;
+        const path = this.getConfigPath();
+        const dir = path.substring(0, path.lastIndexOf('/'));
+        if (dir && !(await adapter.exists(dir))) await adapter.mkdir(dir);
+        // Stage outside the visible vault: staging must not trigger file rename/delete
+        // handlers or create extra mtime changes in the synchronized config directory.
+        const stagingDir = stateRoot(this);
+        await this.ensureConfigDirectory(stagingDir);
+        const tmpPath = `${stagingDir}/config-pending-${this.configSessionId}.json`;
+        stage = '暂存配置';
+        await adapter.write(tmpPath, serialized);
+        const latest = await this.readCurrentConfig();
+        if (latest.raw !== disk.raw)
+          throw new Error('Config changed during save; keeping local recovery');
+        stage = '保存备份';
+        // DataAdapter.copy refuses an existing destination. Write the validated
+        // snapshot instead; immutable history already preserves older backups.
+        if (disk.raw !== null) await adapter.write(`${path}.bak`, disk.raw);
+        // Check again after the asynchronous backup; never fall back to a blind write.
+        if ((await this.readCurrentConfig()).raw !== disk.raw) {
+          throw new Error(
+            'Config changed during backup; keeping local recovery',
+          );
+        }
+        stage = '提交配置';
+        // DataAdapter.rename also refuses to replace an existing destination.
+        // process serializes the read/check/write against Obsidian's adapter queue.
+        if (disk.raw !== null) {
+          await adapter.process(path, (current) => {
+            if (current !== disk.raw)
+              throw new Error(
+                'Config changed before commit; keeping local recovery',
+              );
+            return serialized;
+          });
+        } else {
+          await adapter.write(path, serialized);
+        }
+        try {
+          await adapter.remove(tmpPath);
+        } catch (cleanupError) {
+          console.warn(
+            '[Iconize] Saved config; could not remove staging file:',
+            cleanupError,
+          );
+        }
+      }
+      // Incorporate remote changes without losing edits arriving while I/O was in flight.
+      this.data = rebaseConfig(
+        local,
+        cloneConfig(this.data),
+        merged,
+      ) as typeof this.data;
+      this.configVersionBaseline = cloneConfig(this.data);
+      this.configBaseline = cloneConfig(merged);
+      this.configLoadState = 'ok';
+      this._lastSavedConfig = serialized;
+      this.configSaveSucceeded = true;
+      this.configLastSaveError = null;
+      this.configRecoveryPending = false;
+      await this.updateConfigCheckpoint(merged);
+      this.refreshConfiguredIcons(local);
+    } catch (error) {
+      console.error('[Iconize] Config save stopped:', error);
+      this.configLastSaveError = {
+        stage,
+        message: error instanceof Error ? error.message : String(error),
+        at: new Date().toISOString(),
+      };
+      // Keep both versions recoverable even after the app closes. This is only written
+      // on a real failed edit, never during startup or idle synchronization.
+      if (local) {
+        try {
+          const dir = stateRoot(this);
+          await this.ensureConfigDirectory(dir);
+          await this.app.vault.adapter.write(
+            `${dir}/config-local-recovery-${this.configSessionId}.json`,
+            JSON.stringify(
+              {
+                configPath: this.getConfigPath(),
+                failure: this.configLastSaveError,
+                baseline: this.configBaseline,
+                local: this.data,
+              },
+              null,
+              2,
+            ),
+          );
+        } catch (recoveryError) {
+          console.error(
+            '[Iconize] Could not preserve local recovery:',
+            recoveryError,
+          );
+          new Notice(
+            'Iconize: config and recovery could not be saved. Keep Obsidian open and retry.',
+            0,
+          );
+          return;
+        }
+      }
+      new Notice(
+        `Iconize：${stage}失败：${this.configLastSaveError.message}。本机改动已保留在 ${stateRoot(this)}/config-local-recovery-${this.configSessionId}.json。`,
+        0,
+      );
     } finally {
       this._savePending = false;
+      waiters.forEach((resolve) => resolve());
+    }
+  }
+
+  private async ensureConfigDirectory(path: string): Promise<void> {
+    let current = '';
+    for (const part of path.split('/')) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(current)))
+        await this.app.vault.adapter.mkdir(current);
+    }
+  }
+
+  private scheduleConfigRefresh(): void {
+    if (this.initializing || this.unloading || this.configMaintenance) return;
+    if (this.configRefreshTimer !== null) clearTimeout(this.configRefreshTimer);
+    this.configRefreshTimer = window.setTimeout(() => {
+      this.configRefreshTimer = null;
+      void this.refreshExternalConfig();
+    }, 1000);
+  }
+
+  async onExternalSettingsChange(): Promise<void> {
+    // The default data.json is hidden from Vault events.
+    this.scheduleConfigRefresh();
+  }
+
+  private async refreshExternalConfig(): Promise<void> {
+    const epoch = this.configMaintenanceEpoch ?? 0;
+    if (
+      this.initializing ||
+      this.unloading ||
+      this.configMaintenance ||
+      this.configLoadState === 'failed'
+    )
+      return;
+    if (this._savePending) {
+      // Defer an actual file notification while a local write is in progress.
+      this.scheduleConfigRefresh();
+      return;
+    }
+    try {
+      const disk = await this.readCurrentConfig();
+      if (equalConfig(disk.data, this.configBaseline)) return;
+      await this.preserveConfigHistory('external-change', disk.data);
+      if (
+        this.configMaintenance ||
+        (this.configMaintenanceEpoch ?? 0) !== epoch
+      )
+        return;
+      const local = cloneConfig(this.data);
+      const merged = mergeConfig(this.configBaseline, local, disk.data);
+      const wasClean =
+        JSON.stringify(this.data, null, 2) === this._lastSavedConfig;
+      this.data = merged as typeof this.data;
+      this.configVersionBaseline = cloneConfig(this.data);
+      this.configBaseline = cloneConfig(disk.data);
+      if (wasClean) this._lastSavedConfig = JSON.stringify(disk.data, null, 2);
+      this.refreshConfiguredIcons(local);
+      await this.updateConfigCheckpoint(merged);
+      if (!equalConfig(merged, disk.data)) void this.saveIconFolderData();
+    } catch (error) {
+      // A partial sync write is not an empty config. Leave data and baselines intact.
+      console.warn('[Iconize] External config not applied:', error);
+    }
+  }
+
+  private refreshConfiguredIcons(previous: ConfigData = {}): void {
+    if (this.unloading) return;
+    IconCache.getInstance().clear();
+    const paths = new Set([
+      ...Object.keys(previous),
+      ...Object.keys(this.data),
+    ]);
+    const settingsChanged = !equalConfig(previous.settings, this.data.settings);
+    for (const path of paths) {
+      if (
+        path !== 'settings' &&
+        (settingsChanged || !equalConfig(previous[path], this.data[path]))
+      ) {
+        this._refreshFileExplorerIcon(path);
+      }
+    }
+    for (const opened of getAllOpenedFiles(this)) {
+      if (this.getSettings().iconInTabsEnabled) {
+        iconTabs.add(
+          this,
+          opened.path,
+          (opened.leaf as TabHeaderLeaf).tabHeaderInnerIconEl,
+        );
+      }
+      if (this.getSettings().iconInTitleEnabled) {
+        this.applyTitleIcon(
+          (opened.leaf.view as InlineTitleView).inlineTitleEl,
+          icon.getByPath(this, opened.path) ||
+            getFolderNoteInheritedIcon(this, opened.path),
+          opened.path,
+        );
+      }
     }
   }
   // ===== END PATCH =====
@@ -1868,6 +2562,8 @@ export default class IconizePlugin extends Plugin {
   }
 
   getIconNameFromPath(path: string): string | undefined {
+    const frontmatter = this.getFrontmatterIcon(path);
+    if (frontmatter) return frontmatter.iconName;
     if (typeof this.getData()[path] === 'object') {
       return (this.getData()[path] as FolderIconObject).iconName;
     }

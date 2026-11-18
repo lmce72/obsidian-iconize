@@ -66,6 +66,16 @@ const add = async (
     return;
   }
 
+  const frontmatter = plugin.getFrontmatterIcon?.(filePath);
+  if (frontmatter) {
+    dom.setIconForNode(plugin, frontmatter.iconName, iconContainer, {
+      color: frontmatter.iconColor ?? plugin.getSettings().iconColor,
+      shouldApplyAllStyles: true,
+    });
+    iconContainer.style.margin = null;
+    return;
+  }
+
   // Add icons to tabs if a custom rule is applicable.
   //
   // 命中规则时它会成为这个标签页的图标，下面「该路径没有图标」的出口因此不能清身份。

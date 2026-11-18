@@ -65,6 +65,12 @@ export interface CustomRule {
 }
 
 export interface IconFolderSettings {
+  /** 正文标签自动转换 / Automatically convert prose shortcodes. */
+  autoConvertIcons: boolean;
+  /** 停止输入后的等待秒数 / Idle delay in seconds. */
+  autoConvertDelay: number;
+  /** 可移植图标输出格式 / Portable icon output format. */
+  iconEmbedFormat: 'svg' | 'data' | 'file';
   /**
    * The version of the settings which is used for migrations. This number should be
    * bumped up for every migration.
@@ -192,6 +198,18 @@ export interface IconFolderSettings {
    * @default '.obsidian/plugins/obsidian-icon-folder/data.json'
    */
   configFilePath?: string;
+  /** Values explicitly removed by the user, for safe cross-device deletion. */
+  configRemovals?: Record<string, unknown>;
+  /** Per-item edit clocks and deletion tombstones for union / latest-item merging. */
+  configItemVersions?: Record<
+    string,
+    {
+      updatedAt: number;
+      writer: string;
+      value?: unknown;
+      deleted?: boolean;
+    }
+  >;
   /**
    * Automatically inherit each folder note icon from its parent folder.
    * @default false
@@ -216,6 +234,9 @@ export interface IconFolderSettings {
 }
 
 export const DEFAULT_SETTINGS: IconFolderSettings = {
+  autoConvertIcons: false,
+  autoConvertDelay: 10,
+  iconEmbedFormat: 'data',
   migrated: 2,
   iconPacksPath: '.obsidian/icons',
   fontSize: 16,

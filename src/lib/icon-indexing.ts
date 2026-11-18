@@ -71,13 +71,9 @@ export function commonRootOf(paths: string[]): string {
     return '';
   }
 
-  const segmentLists = paths.map((path) => {
-    const dir = dirnameOf(path);
-    return dir === '' ? [] : dir.split('/');
-  });
-
-  let common = segmentLists[0];
-  for (const segments of segmentLists.slice(1)) {
+  let common = dirnameOf(paths[0]).split('/').filter(Boolean);
+  for (let index = 1; index < paths.length && common.length; index++) {
+    const segments = dirnameOf(paths[index]).split('/');
     let i = 0;
     while (
       i < common.length &&
@@ -122,7 +118,10 @@ function distinguishingSegments(folders: string[]): number[] {
   const segmentLists = folders.map((folder) =>
     folder === '' ? [] : folder.split('/'),
   );
-  const depth = Math.max(...segmentLists.map((segments) => segments.length), 0);
+  const depth = segmentLists.reduce(
+    (max, segments) => Math.max(max, segments.length),
+    0,
+  );
   const indices: number[] = [];
 
   for (let i = 0; i < depth; i++) {

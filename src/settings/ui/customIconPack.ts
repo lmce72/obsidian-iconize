@@ -116,7 +116,7 @@ export default class CustomIconPackSetting extends IconFolderSetting {
       const iconPackSetting = new Setting(this.containerEl)
         .setName(`${iconPack.getName()} (${iconPack.getPrefix()})`)
         .setDesc(
-          `Total icons: ${iconPack.getIcons().length}${isLucideIconPack ? ` ${additionalLucideDescription}` : ''}`,
+          `Total icons: ${iconPack.size}${isLucideIconPack ? ` ${additionalLucideDescription}` : ''}`,
         );
       // iconPackSetting.addButton((btn) => {
       //   btn.setIcon('broken-link');
@@ -213,7 +213,7 @@ export default class CustomIconPackSetting extends IconFolderSetting {
                 );
               iconPack.addIcon(file.name, content);
               iconPackSetting.setDesc(
-                `Total icons: ${iconPack.getIcons().length} (added: ${file.name})`,
+                `Total icons: ${iconPack.size} (added: ${file.name})`,
               );
             }
             new Notice('Icons successfully added.');
@@ -280,7 +280,7 @@ export default class CustomIconPackSetting extends IconFolderSetting {
               );
             iconPack.addIcon(file.name, content);
             iconPackSetting.setDesc(
-              `Total icons: ${iconPack.getIcons().length} (added: ${file.name})`,
+              `Total icons: ${iconPack.size} (added: ${file.name})`,
             );
           }
 

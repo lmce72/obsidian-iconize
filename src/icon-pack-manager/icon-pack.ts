@@ -119,11 +119,27 @@ export class IconPack {
     this.byKey = new Map();
 
     for (const entry of this.entries) {
-      this.byKey.set(entry.id.toLowerCase(), entry);
-      // 裸名作为次级键，真正的 id 始终优先于恰好长得像 id 的名称。
-      const nameKey = entry.name.toLowerCase();
-      if (!this.byKey.has(nameKey)) {
-        this.byKey.set(nameKey, entry);
+      this.registerEntry(entry);
+    }
+  }
+
+  private registerEntry(entry: IconEntry): void {
+    this.byKey.set(entry.id.toLowerCase(), entry);
+    const nameKey = entry.name.toLowerCase();
+    if (!this.byKey.has(nameKey)) this.byKey.set(nameKey, entry);
+  }
+
+  /** 大包的启动登记分片执行。 / Register large packs cooperatively at startup. */
+  public async loadIndex(index: IconPackIndex): Promise<void> {
+    this.entries = index.entries;
+    this.byKey = new Map();
+    let count = 0;
+    let start = performance.now();
+    for (const entry of this.entries) {
+      this.registerEntry(entry);
+      if (++count % 256 === 0 && performance.now() - start >= 8) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        start = performance.now();
       }
     }
   }
@@ -169,6 +185,19 @@ export class IconPack {
     }
 
     return this.icons.find((icon) => getNormalizedName(icon.name) === iconName);
+  }
+
+  /** 精确匹配优先，避免短名被其它名称的子串挤到后面。 / Prioritize exact names over substring matches. */
+  public findExactIcon(query: string): Icon | undefined {
+    const entry = this.getEntry(query);
+    if (entry) return this.toMetadataIcon(entry);
+    const key = query.trim().toLowerCase();
+    return this.icons.find(
+      (icon) =>
+        icon.name.toLowerCase() === key ||
+        (icon.prefix + icon.name).toLowerCase() === key ||
+        icon.displayName.toLowerCase() === key,
+    );
   }
 
   /**
@@ -221,5 +250,14 @@ export class IconPack {
     }
 
     return this.icons;
+  }
+
+  /** 逐条枚举元数据，避免每次搜索复制整个包。 / Iterate without allocating a full metadata array. */
+  public *iterateIcons(): Generator<Icon> {
+    if (this.entries.length) {
+      for (const entry of this.entries) yield this.toMetadataIcon(entry);
+    } else {
+      yield* this.icons;
+    }
   }
 }
