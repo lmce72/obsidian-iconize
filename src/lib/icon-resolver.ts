@@ -1,31 +1,17 @@
-/**
- * IconResolver - 图标解析器（三层缓存架构）
- * Icon Resolver with three-tier cache architecture.
- *
- * 解析按三层依次尝试，命中即止：
- * 1. **内存** — 本次会话已解析过，同步返回，是渲染路径依赖的那一层。
- * 2. **磁盘缓存** — 上次会话解析过，一次小文件读取。
- * 3. **图标包本身** — 该图标首次使用，读取该条目并写入磁盘缓存，之后不再走到这一层。
- *
- * Resolution walks three tiers and stops at the first hit; the practical effect
- * is that a vault only ever pays for the icons it actually uses.
- */
-
-import IconizePlugin from '@app/main';
+/** 按需解析，所有 SVG 缓存均有数量和字节上限。 / Demand loading with bounded SVG caches. */
+import type IconizePlugin from '@app/main';
+import type { Icon } from '@app/icon-pack-manager';
+import type { IconEntry } from './icon-indexing';
+import type { IconSource } from './icon-sources';
+import { logger } from './logger';
+import { yieldToMain } from './task-scheduler';
 import svg from './util/svg';
-import { IconEntry } from './icon-indexing';
-import { IconSource } from './icon-sources';
-import { Icon } from '@app/icon-pack-manager';
 
-// ===== PATCHED: 解析器类型 / Resolver types =====
 export interface ResolveOptions {
-  /** 是否写入磁盘缓存 / Whether to write the result to the on-disk cache. */
   persist?: boolean;
-  /** 图标颜色 / Color to draw the icon in. */
   foreground?: string | null;
 }
 
-/** 一个已定位的图标：它属于哪个包、条目是什么、字节从哪里读。 */
 export interface LocatedIcon {
   packName: string;
   prefix: string;
@@ -33,471 +19,788 @@ export interface LocatedIcon {
   source: IconSource;
 }
 
-/** 已解析的图标，形状与 Iconize 既有 Icon 接口保持一致。 */
+/** 与图标包共享查找表，不再为每个图标建立第二份索引。 / Share the pack's lookup. */
+export interface IconEntryLookup {
+  readonly length: number;
+  getEntry(query: string): IconEntry | undefined;
+}
+
 export type ResolvedIcon = Icon;
-// ===== END PATCH =====
 
-/** 预览图标在内存中最多保留的数量。 */
-const PREVIEW_MEMORY_LIMIT = 400;
+export interface IconCacheLimits {
+  memoryBytes: number;
+  memoryEntries: number;
+  previewBytes: number;
+  previewEntries: number;
+  diskBytes: number;
+  diskEntries: number;
+}
 
-export class IconResolver {
-  private plugin: IconizePlugin;
+export const DEFAULT_ICON_CACHE_LIMITS: Readonly<IconCacheLimits> = {
+  memoryBytes: 4 * 1024 * 1024,
+  memoryEntries: 2048,
+  previewBytes: 512 * 1024,
+  previewEntries: 128,
+  diskBytes: 2 * 1024 * 1024,
+  diskEntries: 2048,
+};
 
-  /** 仓库实际使用的图标，无上限：渲染需要它们，数量只等于仓库引用数。 */
-  public memoryCache: Map<string, ResolvedIcon>;
+/** UTF-16 文本及少量对象开销的保守预算。 / Conservative UTF-16 and object accounting. */
+function iconBytes(icon: ResolvedIcon): number {
+  return (
+    256 +
+    2 *
+      (icon.svgElement.length +
+        (icon.svgContent === icon.svgElement ? 0 : icon.svgContent.length) +
+        icon.name.length +
+        icon.prefix.length +
+        icon.displayName.length +
+        (icon.iconPackName?.length ?? 0))
+  );
+}
 
-  /** 仅为绘制预览而解析的图标，有上限且从不写盘。 */
-  private previews: Map<string, ResolvedIcon>;
+class BoundedCache<T> {
+  readonly entries = new Map<string, T>();
+  bytes = 0;
 
-  /** 缓存文件路径 / Path of the cache file. */
-  private diskCachePath: string;
+  constructor(
+    private readonly maxBytes: number,
+    private readonly maxEntries: number,
+    private readonly weight: (value: T, key: string) => number,
+  ) {}
 
-  /**
-   * 磁盘缓存的内容，首次使用时整体读入一次。
-   * Contents of the disk cache, read once on first use.
-   *
-   * 单文件缓存意味着「读缓存」是一次文件读取而不是上百次；之后全部命中内存表。
-   * A single cache file means reading it is one file read instead of a hundred, after
-   * which every hit is an in-memory lookup.
-   */
-  private diskCache: Map<string, ResolvedIcon> | null = null;
-
-  /** 有未落盘的改动 / Whether there are changes not yet written. */
-  private diskCacheDirty = false;
-
-  /** 延迟写盘的定时器 / Timer for the deferred write. */
-  private flushTimer: number | null = null;
-
-  /** 图标 id（小写）到定位信息的查找表。 */
-  private lookup: Map<string, LocatedIcon>;
-
-  constructor(plugin: IconizePlugin, diskCachePath: string) {
-    this.plugin = plugin;
-    this.memoryCache = new Map();
-    this.previews = new Map();
-    this.diskCachePath = diskCachePath;
-    this.lookup = new Map();
+  get(key: string): T | undefined {
+    const value = this.entries.get(key);
+    if (value !== undefined) {
+      this.entries.delete(key);
+      this.entries.set(key, value);
+    }
+    return value;
   }
 
-  /**
-   * 读取整个缓存文件 / Loads the whole cache file.
-   *
-   * 条目必须自带可用标记：截断写入或旧格式会解析出无用内容，当作命中返回会让调用方
-   * 把 `undefined` 写进 DOM。
-   *
-   * Every entry must carry usable markup: a truncated write or an older format parses to
-   * something useless, and returning that as a hit makes the caller write `undefined` into
-   * the DOM.
-   */
-  private async ensureDiskCacheLoaded(): Promise<Map<string, ResolvedIcon>> {
-    if (this.diskCache) {
-      return this.diskCache;
+  set(key: string, value: T): boolean {
+    this.delete(key);
+    const bytes = this.weight(value, key);
+    if (bytes > this.maxBytes || this.maxEntries < 1) return false;
+    this.entries.set(key, value);
+    this.bytes += bytes;
+    while (this.bytes > this.maxBytes || this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.delete(oldest);
     }
+    return true;
+  }
 
-    const cache = new Map<string, ResolvedIcon>();
-    this.diskCache = cache;
+  delete(key: string): boolean {
+    const value = this.entries.get(key);
+    if (value === undefined) return false;
+    this.bytes -= this.weight(value, key);
+    return this.entries.delete(key);
+  }
 
+  clear(): void {
+    this.entries.clear();
+    this.bytes = 0;
+  }
+}
+
+interface RegisteredPack {
+  name: string;
+  prefix: string;
+  lowerPrefix: string;
+  lookup: IconEntryLookup;
+  source: IconSource;
+}
+
+interface DiskIcon {
+  packName: string;
+  svgElement: string;
+}
+
+interface ResolveJob {
+  key: string;
+  located: LocatedIcon;
+  generation: number;
+  persist: boolean;
+  promise: Promise<ResolvedIcon | null>;
+  complete: (icon: ResolvedIcon | null) => void;
+}
+
+const HOT_LOOKUP_LIMIT = 512;
+const MAX_CONCURRENT_LOADS = 2;
+const SLICE_MS = 4;
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export class IconResolver {
+  private readonly limits: IconCacheLimits;
+  private readonly memory: BoundedCache<ResolvedIcon>;
+  private readonly previews: BoundedCache<ResolvedIcon>;
+  private readonly packs = new Map<string, RegisteredPack>();
+  private readonly hotLookup = new Map<string, LocatedIcon>();
+  private readonly inFlight = new Map<string, ResolveJob>();
+  private pending: ResolveJob[] = [];
+  private activeLoads = 0;
+  private deadline = 0;
+  private generation = 0;
+  private disposed = false;
+  private disposal: Promise<void> | null = null;
+  private diskCache: BoundedCache<DiskIcon> | null = null;
+  private diskCacheLoad: Promise<BoundedCache<DiskIcon>> | null = null;
+  private diskGeneration = 0;
+  private diskCacheDirty = false;
+  private flushTimer: number | null = null;
+  private flushing: Promise<void> | null = null;
+  private directoryReady = false;
+
+  constructor(
+    private readonly plugin: IconizePlugin,
+    private readonly diskCachePath: string,
+    limits: Partial<IconCacheLimits> = {},
+  ) {
+    this.limits = { ...DEFAULT_ICON_CACHE_LIMITS, ...limits };
+    this.memory = new BoundedCache(
+      this.limits.memoryBytes,
+      this.limits.memoryEntries,
+      iconBytes,
+    );
+    this.previews = new BoundedCache(
+      this.limits.previewBytes,
+      this.limits.previewEntries,
+      iconBytes,
+    );
+  }
+
+  /** 保留既有诊断接口；键始终是规范 id。 / Retain the existing canonical-key map API. */
+  get memoryCache(): Map<string, ResolvedIcon> {
+    return this.memory.entries;
+  }
+
+  private createDiskCache(): BoundedCache<DiskIcon> {
+    return new BoundedCache(
+      this.limits.diskBytes,
+      this.limits.diskEntries,
+      (value, key) =>
+        128 +
+        2 * (key.length + value.packName.length + value.svgElement.length),
+    );
+  }
+
+  /** 所有并发请求等待同一个读取任务，不能提前发布空表。 / Publish only the fully loaded cache. */
+  private ensureDiskCacheLoaded(): Promise<BoundedCache<DiskIcon>> {
+    if (this.diskCacheLoad) return this.diskCacheLoad;
+    if (this.diskCache) return Promise.resolve(this.diskCache);
+    if (this.disposed) return Promise.resolve(this.createDiskCache());
+    const generation = this.diskGeneration;
+    const cache = this.createDiskCache();
+    const loading = this.readDiskCache(cache, generation);
+    this.diskCacheLoad = loading;
+    void loading.then(() => {
+      if (this.diskCacheLoad === loading) this.diskCacheLoad = null;
+    });
+    return loading;
+  }
+
+  private async readDiskCache(
+    cache: BoundedCache<DiskIcon>,
+    generation: number,
+  ): Promise<BoundedCache<DiskIcon>> {
     try {
-      if (!(await this.plugin.app.vault.adapter.exists(this.diskCachePath))) {
-        return cache;
-      }
-
-      const raw = await this.plugin.app.vault.adapter.read(this.diskCachePath);
-      const parsed = JSON.parse(raw) as Record<string, ResolvedIcon>;
-      if (!parsed || typeof parsed !== 'object') {
-        return cache;
-      }
-
-      for (const [iconId, icon] of Object.entries(parsed)) {
+      const adapter = this.plugin.app.vault.adapter;
+      const stat = await adapter.stat(this.diskCachePath);
+      // 旧版本可能留下巨型缓存，先 stat 再读，避免仅迁移就占用大量内存。
+      // Check size before reading a potentially unbounded legacy cache.
+      const maxFileBytes = Math.max(1024, this.limits.diskBytes * 2);
+      if (
+        stat &&
+        stat.size <= maxFileBytes &&
+        !this.disposed &&
+        generation === this.diskGeneration
+      ) {
+        this.directoryReady = true;
+        const raw = await adapter.read(this.diskCachePath);
         if (
-          icon &&
-          typeof icon.svgElement === 'string' &&
-          icon.svgElement !== ''
+          raw.length <= maxFileBytes &&
+          !this.disposed &&
+          generation === this.diskGeneration
         ) {
-          cache.set(iconId, icon);
+          const parsed: unknown = JSON.parse(raw);
+          const rows: unknown[] =
+            record(parsed) &&
+            parsed.version === 2 &&
+            Array.isArray(parsed.entries)
+              ? parsed.entries
+              : record(parsed)
+                ? Object.entries(parsed)
+                : [];
+          let deadline = performance.now() + SLICE_MS;
+          for (const row of rows) {
+            if (this.disposed || generation !== this.diskGeneration) break;
+            if (Array.isArray(row) && typeof row[0] === 'string') {
+              if (
+                row.length === 3 &&
+                typeof row[1] === 'string' &&
+                typeof row[2] === 'string' &&
+                row[2]
+              ) {
+                cache.set(row[0], { packName: row[1], svgElement: row[2] });
+              } else if (
+                record(row[1]) &&
+                typeof row[1].iconPackName === 'string' &&
+                typeof row[1].svgElement === 'string' &&
+                row[1].svgElement
+              ) {
+                cache.set(row[0], {
+                  packName: row[1].iconPackName,
+                  svgElement: row[1].svgElement,
+                });
+              }
+            }
+            if (performance.now() >= deadline) {
+              await yieldToMain('background');
+              deadline = performance.now() + SLICE_MS;
+            }
+          }
         }
       }
     } catch (error) {
-      console.warn('[IconResolver] Could not read the icon cache:', error);
+      logger.warn('Could not read the icon cache', undefined, error);
     }
-
+    if (!this.disposed && generation === this.diskGeneration)
+      this.diskCache = cache;
     return cache;
   }
 
-  /**
-   * 安排一次延迟写盘 / Schedules a deferred write.
-   *
-   * 启动时往往连续解析多个图标，逐次写盘会把整个文件反复重写。
-   * Startup resolves several icons in a row, and writing on each would rewrite the whole
-   * file repeatedly.
-   */
   private scheduleFlush(): void {
     this.diskCacheDirty = true;
-    if (this.flushTimer !== null) {
-      return;
-    }
-
+    if (this.disposed || this.flushTimer !== null || this.flushing) return;
     this.flushTimer = window.setTimeout(() => {
       this.flushTimer = null;
       void this.flushDiskCache();
-    }, 1000);
+    }, 1500);
   }
 
-  /**
-   * 把缓存写回磁盘 / Writes the cache back to disk.
-   */
-  private async flushDiskCache(): Promise<void> {
-    if (!this.diskCacheDirty || !this.diskCache) {
+  /** 一个有界文件，写入串行化；每项仅存一份 SVG。 / One bounded file, serialized writes, one SVG per row. */
+  private async flushDiskCache(onDispose = false): Promise<void> {
+    if (this.flushing) {
+      await this.flushing;
+      return this.flushDiskCache(onDispose);
+    }
+    if (
+      !this.diskCacheDirty ||
+      !this.diskCache ||
+      (this.disposed && !onDispose)
+    )
       return;
-    }
+    const cache = this.diskCache;
+    const generation = this.diskGeneration;
     this.diskCacheDirty = false;
-
-    try {
-      const dir = this.diskCachePath.substring(
-        0,
-        this.diskCachePath.lastIndexOf('/'),
-      );
-      if (!(await this.plugin.app.vault.adapter.exists(dir))) {
-        await this.ensureDirectoryPath(dir);
+    let failed = false;
+    const writing = (async () => {
+      try {
+        await yieldToMain('background');
+        if (generation !== this.diskGeneration) return;
+        if (this.disposed && !onDispose) {
+          this.diskCacheDirty = true;
+          return;
+        }
+        const entries: Array<[string, string, string]> = [];
+        for (const [id, value] of cache.entries)
+          entries.push([id, value.packName, value.svgElement]);
+        const content = JSON.stringify({ version: 2, entries });
+        const dir = this.diskCachePath.substring(
+          0,
+          this.diskCachePath.lastIndexOf('/'),
+        );
+        if (dir) await this.ensureDirectoryPath(dir);
+        if (generation !== this.diskGeneration) return;
+        if (this.disposed && !onDispose) {
+          this.diskCacheDirty = true;
+          return;
+        }
+        await this.plugin.app.vault.adapter.write(this.diskCachePath, content);
+      } catch (error) {
+        failed = true;
+        this.directoryReady = false;
+        if (generation === this.diskGeneration) this.diskCacheDirty = true;
+        logger.error('Failed to write the icon cache', undefined, error);
       }
-
-      await this.plugin.app.vault.adapter.write(
-        this.diskCachePath,
-        JSON.stringify(Object.fromEntries(this.diskCache)),
-      );
-    } catch (error) {
-      console.error('[IconResolver] Failed to write the icon cache:', error);
-    }
+    })();
+    this.flushing = writing;
+    await writing;
+    if (this.flushing === writing) this.flushing = null;
+    if (this.diskCacheDirty && !this.disposed && !failed) this.scheduleFlush();
   }
 
-  /**
-   * 登记一个图标包的全部条目 / Register every entry of one pack for lookup.
-   */
   async registerPack(
     packName: string,
     prefix: string,
-    entries: IconEntry[],
+    entries: IconEntry[] | IconEntryLookup,
     source: IconSource,
   ): Promise<void> {
-    let count = 0;
-    let start = performance.now();
-    for (const entry of entries) {
-      const located: LocatedIcon = { packName, prefix, entry, source };
-      this.lookup.set(entry.id.toLowerCase(), located);
-      // 裸名作为次级键，真正的 id 始终优先于恰好长得像 id 的名称。
-      const nameKey = entry.name.toLowerCase();
-      if (!this.lookup.has(nameKey)) {
-        this.lookup.set(nameKey, located);
+    if (this.disposed) return;
+    let lookup: IconEntryLookup;
+    if (Array.isArray(entries)) {
+      // 兼容旧 API；正常启动直接共享 IconPack 的紧凑查找表。
+      // Legacy array callers remain supported; normal startup shares the pack lookup.
+      const byKey = new Map<string, IconEntry>();
+      let deadline = performance.now() + SLICE_MS;
+      for (const entry of entries) {
+        byKey.set(entry.id.toLowerCase(), entry);
+        if (performance.now() >= deadline) {
+          await yieldToMain('background');
+          if (this.disposed) return;
+          deadline = performance.now() + SLICE_MS;
+        }
       }
-      if (++count % 256 === 0 && performance.now() - start >= 8) {
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-        start = performance.now();
+      for (const entry of entries) {
+        const key = entry.name.toLowerCase();
+        if (!byKey.has(key)) byKey.set(key, entry);
+        if (performance.now() >= deadline) {
+          await yieldToMain('background');
+          if (this.disposed) return;
+          deadline = performance.now() + SLICE_MS;
+        }
       }
+      lookup = {
+        length: entries.length,
+        getEntry: (query) => byKey.get(query.toLowerCase()),
+      };
+    } else {
+      lookup = entries;
     }
+    this.cancelPending();
+    this.hotLookup.clear();
+    this.packs.delete(packName);
+    this.packs.set(packName, {
+      name: packName,
+      prefix,
+      lowerPrefix: prefix.toLowerCase(),
+      lookup,
+      source,
+    });
   }
 
-  /**
-   * 定位一个图标 / Finds an icon by its full identifier or bare name.
-   */
+  /** 两阶段查询使任何包的全 id 都优先于另一包的裸名。 / Full ids win across prefix collisions. */
   find(iconId: string): LocatedIcon | undefined {
-    if (!iconId) {
+    if (!iconId || this.disposed) return undefined;
+    const key = iconId.toLowerCase();
+    const cached = this.hotLookup.get(key);
+    if (cached) return cached;
+    let found: LocatedIcon | undefined;
+    for (const pack of this.packs.values()) {
+      if (!key.startsWith(pack.lowerPrefix)) continue;
+      const entry = pack.lookup.getEntry(key);
+      if (entry?.id.toLowerCase() === key)
+        found = {
+          packName: pack.name,
+          prefix: pack.prefix,
+          entry,
+          source: pack.source,
+        };
+    }
+    if (!found) {
+      for (const pack of this.packs.values()) {
+        const entry = pack.lookup.getEntry(key);
+        if (entry?.name.toLowerCase() === key) {
+          found = {
+            packName: pack.name,
+            prefix: pack.prefix,
+            entry,
+            source: pack.source,
+          };
+          break;
+        }
+      }
+    }
+    if (found) {
+      this.hotLookup.set(key, found);
+      if (this.hotLookup.size > HOT_LOOKUP_LIMIT) {
+        const first = this.hotLookup.keys().next().value as string | undefined;
+        if (first !== undefined) this.hotLookup.delete(first);
+      }
+    }
+    return found;
+  }
+
+  peek(iconId: string): ResolvedIcon | undefined {
+    const located = this.find(iconId);
+    if (!located) return undefined;
+    const cached =
+      this.memory.get(located.entry.id) ?? this.previews.get(located.entry.id);
+    if (cached && cached.iconPackName !== located.packName) {
+      this.memory.delete(located.entry.id);
+      this.previews.delete(located.entry.id);
       return undefined;
     }
-    return this.lookup.get(iconId.toLowerCase());
+    return cached;
   }
 
-  /**
-   * 同步查询 - 仅返回已加载到内存的图标 / Synchronous peek.
-   *
-   * 渲染路径是同步的、无法 await，因此依赖这一层；仓库用到的图标会在启动时预取。
-   */
-  peek(iconId: string): ResolvedIcon | undefined {
-    return this.memoryCache.get(iconId) ?? this.previews.get(iconId);
-  }
-
-  /**
-   * 记录一个已解析的图标到合适的分层 / Records a resolved icon in its tier.
-   */
-  private remember(iconId: string, icon: ResolvedIcon, persist: boolean): void {
+  private remember(key: string, icon: ResolvedIcon, persist: boolean): void {
     if (persist) {
-      this.previews.delete(iconId);
-      this.memoryCache.set(iconId, icon);
-      return;
-    }
-
-    this.previews.set(iconId, icon);
-    while (this.previews.size > PREVIEW_MEMORY_LIMIT) {
-      const oldest = this.previews.keys().next().value as string | undefined;
-      if (oldest === undefined) {
-        break;
-      }
-      this.previews.delete(oldest);
+      this.previews.delete(key);
+      this.memory.set(key, icon);
+    } else if (!this.memory.get(key)) {
+      this.previews.set(key, icon);
     }
   }
 
-  /**
-   * 异步解析 - 仅在必要时读取图标包 / Resolves an icon, reading from the pack only if it has to.
-   */
   async resolve(
     iconId: string,
     options: ResolveOptions = {},
   ): Promise<ResolvedIcon | null> {
+    if (this.disposed) return null;
+    const located = this.find(iconId);
+    if (!located) return null;
+    const key = located.entry.id;
+    const generation = this.generation;
     const persist = options.persist ?? true;
-
-    try {
-      const located = this.find(iconId);
-      if (!located) {
-        return null;
+    const memoized = this.peek(key);
+    let result: ResolvedIcon | null;
+    if (memoized) {
+      if (persist && !this.memory.entries.has(key)) {
+        this.remember(key, memoized, true);
+        await this.saveToDiskCache(key, memoized);
       }
-
-      // 磁盘缓存一律以条目 id 为键，而不是调用方传进来的字符串。
-      // 同一个图标可能以裸名（`home`）、大小写变体（`lihome`）等不同形式被查找，
-      // 用查询串做键会为同一个图标写出多份文件，且无法逐条失效。
-      //
-      // The disk cache is always keyed by the entry id rather than the caller's string:
-      // the same icon is looked up as a bare name or in another case, and keying on the
-      // query would write several files for one icon with no way to invalidate them.
-      const cacheKey = located.entry.id;
-
-      const memoized = this.peek(iconId);
-      if (memoized) {
-        // 之前只作为预览解析过的图标，现在真正被使用，提升并写盘。
-        if (persist && !this.memoryCache.has(iconId)) {
-          this.remember(iconId, memoized, true);
-          await this.saveToDiskCache(cacheKey, memoized);
+      result =
+        this.disposed || generation !== this.generation ? null : memoized;
+    } else {
+      let job = this.inFlight.get(key);
+      if (job) {
+        job.persist ||= persist;
+      } else {
+        // executor 的初始化同步发生，排入队列后才启动 I/O。 / Initialize synchronously before starting I/O.
+        const pendingJob = {} as ResolveJob;
+        const promise = new Promise<ResolvedIcon | null>((complete) => {
+          Object.assign(pendingJob, {
+            key,
+            located,
+            persist,
+            generation: this.generation,
+            complete,
+          });
+        });
+        pendingJob.promise = promise;
+        job = pendingJob;
+        this.inFlight.set(key, job);
+        this.pending.push(job);
+        this.drain();
+      }
+      result = await job.promise;
+    }
+    // 颜色属于调用方，不能污染所有 alias 共用的 SVG 缓存。
+    // Foreground colors belong to a caller, never to the shared canonical cache.
+    return result && options.foreground
+      ? {
+          ...result,
+          svgElement: svg.colorize(result.svgElement, options.foreground),
         }
-        return memoized;
-      }
+      : result;
+  }
 
-      // Layer 2: 磁盘缓存。
-      const cached = await this.loadFromDiskCache(cacheKey);
-      if (cached) {
-        this.remember(iconId, cached, persist);
-        return cached;
-      }
+  private drain(): void {
+    while (
+      !this.disposed &&
+      this.activeLoads < MAX_CONCURRENT_LOADS &&
+      this.pending.length
+    ) {
+      const job = this.pending.shift();
+      if (!job) break;
+      this.activeLoads++;
+      void this.load(job).then((icon) => {
+        job.complete(icon);
+        this.activeLoads--;
+        if (this.inFlight.get(job.key) === job) this.inFlight.delete(job.key);
+        this.drain();
+      });
+    }
+  }
 
-      // Layer 3: 从图标包本身读取该条目。
-      const markup = await located.source.readEntry(located.entry.path);
-      if (markup === null) {
-        console.error(
-          `[IconResolver] Icon '${located.entry.id}' is missing from pack '${located.packName}' (path: ${located.entry.path})`,
+  private current(job: ResolveJob): boolean {
+    return !this.disposed && job.generation === this.generation;
+  }
+
+  /** 只校验真正请求的 SVG，不解析索引元数据或已命中的内存缓存。
+   * Validate only requested SVGs, never index metadata or memory-cache hits. */
+  private normalizeSvg(markup: string): string | null {
+    const parsed = new DOMParser().parseFromString(markup, 'image/svg+xml');
+    const root = parsed.documentElement;
+    if (
+      !root ||
+      root.localName !== 'svg' ||
+      (root.namespaceURI &&
+        root.namespaceURI !== 'http://www.w3.org/2000/svg') ||
+      parsed.querySelector('parsererror')
+    )
+      return null;
+    // symbol/defs 本身不绘制；只有其外部的图形或 use 才能形成独立图标。
+    // Definitions do not paint by themselves; a visible shape or use must exist outside them.
+    if (
+      root.querySelector('symbol, defs') &&
+      !Array.from(
+        root.querySelectorAll(
+          'path, rect, circle, ellipse, line, polyline, polygon, text, image, use, foreignObject',
+        ),
+      ).some(
+        (element) =>
+          !element.closest('symbol, defs, clipPath, mask, pattern, marker'),
+      )
+    )
+      return null;
+    return svg.extract(markup) || null;
+  }
+
+  private async load(job: ResolveJob): Promise<ResolvedIcon | null> {
+    try {
+      if (performance.now() >= this.deadline) {
+        await yieldToMain('user-visible');
+        this.deadline = performance.now() + SLICE_MS;
+      }
+      if (!this.current(job)) return null;
+      // 目录 mtime 不代表嵌套 SVG 的内容版本；目录包每会话按需读源。
+      // A directory timestamp cannot validate nested SVG contents across sessions.
+      const cache =
+        job.located.source.type === 'folder'
+          ? null
+          : await this.ensureDiskCacheLoaded();
+      if (!this.current(job)) return null;
+      const cached = cache?.get(job.key);
+      let normalized: string | null = null;
+      if (cached?.packName === job.located.packName) {
+        try {
+          normalized = this.normalizeSvg(cached.svgElement);
+        } catch (error) {
+          logger.warn(
+            'Invalid cached SVG; reading the icon source',
+            undefined,
+            error,
+          );
+        }
+        if (!normalized && cache) {
+          cache.delete(job.key);
+          this.scheduleFlush();
+        }
+      }
+      if (!normalized) {
+        const markup = await job.located.source.readEntry(
+          job.located.entry.path,
         );
-        return null;
+        if (!this.current(job)) return null;
+        if (markup === null) return null;
+        if (performance.now() >= this.deadline) {
+          await yieldToMain('user-visible');
+          this.deadline = performance.now() + SLICE_MS;
+        }
+        if (!this.current(job)) return null;
+        normalized = this.normalizeSvg(markup);
+        if (!normalized) return null;
       }
-
-      const icon = this.build(located, markup);
-      if (!icon) {
-        return null;
+      const icon = this.fromNormalized(job.located, normalized);
+      if (!this.current(job)) return null;
+      this.remember(job.key, icon, job.persist);
+      if (job.persist && cache) {
+        cache.set(job.key, {
+          packName: job.located.packName,
+          svgElement: icon.svgElement,
+        });
+        this.scheduleFlush();
       }
-
-      // 颜色在规范化之后应用：是规范化给了标记一个可覆盖的绘制属性。
-      if (options.foreground) {
-        icon.svgElement = svg.colorize(icon.svgElement, options.foreground);
-      }
-
-      this.remember(iconId, icon, persist);
-      if (persist) {
-        await this.saveToDiskCache(cacheKey, icon);
-      }
-
       return icon;
     } catch (error) {
-      console.error(`[IconResolver] Failed to resolve ${iconId}:`, error);
+      if (this.current(job))
+        logger.error('Failed to resolve an icon', undefined, error);
       return null;
     }
   }
 
-  /**
-   * 批量预加载图标 / Resolves many icons in one batch.
-   */
   async prefetch(
     iconIds: string[],
-  ): Promise<{ loaded: number; failed: string[] }> {
-    const uniqueIds = [...new Set(iconIds)];
+    limit = 128,
+    signal?: AbortSignal,
+  ): Promise<{ loaded: number; failed: string[]; skipped: number }> {
     const failed: string[] = [];
+    const seen = new Set<string>();
+    const generation = this.generation;
     let loaded = 0;
-
-    for (const iconId of uniqueIds) {
-      if (!iconId) {
-        continue;
+    let visited = 0;
+    let processed = 0;
+    const maximum = Number.isFinite(limit)
+      ? Math.max(0, Math.floor(limit))
+      : 128;
+    let deadline = performance.now() + SLICE_MS;
+    for (const iconId of iconIds) {
+      if (
+        this.disposed ||
+        generation !== this.generation ||
+        signal?.aborted ||
+        processed >= maximum
+      )
+        break;
+      if (performance.now() >= deadline) {
+        await yieldToMain('background');
+        deadline = performance.now() + SLICE_MS;
+        if (this.disposed || generation !== this.generation || signal?.aborted)
+          break;
       }
-
-      try {
-        const icon = await this.resolve(iconId);
-        if (icon) {
-          loaded++;
-        } else {
-          failed.push(iconId);
-        }
-      } catch (error) {
-        console.error(`[IconResolver] Prefetch failed for ${iconId}:`, error);
-        failed.push(iconId);
+      visited++;
+      const key = this.find(iconId)?.entry.id ?? iconId;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      processed++;
+      if (await this.resolve(key)) loaded++;
+      else failed.push(iconId);
+      if (performance.now() >= deadline) {
+        await yieldToMain('background');
+        deadline = performance.now() + SLICE_MS;
       }
     }
-
-    console.log(
-      `[IconResolver] Prefetch complete: ${loaded} loaded, ${failed.length} failed`,
-    );
-    return { loaded, failed };
+    return { loaded, failed, skipped: iconIds.length - visited };
   }
 
-  /**
-   * 只取图标标记，供同步渲染路径在内存未命中时异步补齐。
-   * Resolves just the markup, for the synchronous render path to fill in asynchronously.
-   */
   async resolveSvg(iconId: string): Promise<string | undefined> {
-    const icon = await this.resolve(iconId);
-    return icon?.svgElement || undefined;
+    return (await this.resolve(iconId))?.svgElement || undefined;
   }
 
-  /**
-   * 通过规范化标记构建图标对象 / Builds the icon object from normalized markup.
-   */
-  private build(located: LocatedIcon, markup: string): ResolvedIcon | null {
-    const svgElement = svg.extract(markup);
-    if (!svgElement) {
-      return null;
-    }
-
+  private fromNormalized(
+    located: LocatedIcon,
+    normalized: string,
+  ): ResolvedIcon {
     return {
       name: located.entry.name,
       prefix: located.prefix,
       displayName: located.entry.displayName,
       iconPackName: located.packName,
       filename: located.entry.name,
-      svgContent: markup,
-      svgViewbox: extractViewBox(markup),
-      svgElement,
+      svgContent: normalized,
+      svgViewbox: extractViewBox(normalized),
+      svgElement: normalized,
     };
   }
 
-  /**
-   * 查询磁盘缓存 / Looks an icon up in the disk tier.
-   */
-  private async loadFromDiskCache(
-    iconId: string,
-  ): Promise<ResolvedIcon | null> {
-    const cache = await this.ensureDiskCacheLoaded();
-    return cache.get(iconId) ?? null;
-  }
-
-  /**
-   * 写入磁盘缓存 / Stores an icon in the disk tier.
-   *
-   * 只改内存表并安排一次延迟写盘，因此连续解析多个图标不会反复重写整个文件。
-   * Only the in-memory map is touched; the write is deferred, so resolving several icons in
-   * a row does not rewrite the whole file each time.
-   */
   async saveToDiskCache(iconId: string, icon: ResolvedIcon): Promise<void> {
+    if (this.disposed || !icon.iconPackName) return;
+    const located = this.find(iconId);
+    if (located?.source.type === 'folder') return;
+    const generation = this.generation;
     const cache = await this.ensureDiskCacheLoaded();
-    cache.set(iconId, icon);
+    if (this.disposed || generation !== this.generation) return;
+    const key = located?.entry.id ?? iconId;
+    cache.set(key, {
+      packName: icon.iconPackName,
+      svgElement: icon.svgElement,
+    });
     this.scheduleFlush();
   }
 
-  /**
-   * 递归创建目录路径 / Recursively creates a directory path.
-   */
   private async ensureDirectoryPath(path: string): Promise<void> {
-    const parts = path.split('/');
+    if (this.directoryReady) return;
     let current = '';
-
-    for (const part of parts) {
+    for (const part of path.split('/')) {
       current = current ? `${current}/${part}` : part;
-      if (!(await this.plugin.app.vault.adapter.exists(current))) {
+      if (!(await this.plugin.app.vault.adapter.exists(current)))
         await this.plugin.app.vault.adapter.mkdir(current);
-      }
     }
+    this.directoryReady = true;
   }
 
-  /**
-   * 清空内存缓存 / Clears the memory tier.
-   */
+  private cancelPending(): void {
+    this.generation++;
+    for (const job of this.inFlight.values()) job.complete(null);
+    this.pending = [];
+    this.inFlight.clear();
+  }
+
   clearMemoryCache(): void {
-    this.memoryCache.clear();
+    this.cancelPending();
+    this.memory.clear();
     this.previews.clear();
-    console.log('[IconResolver] Memory cache cleared');
   }
 
-  /**
-   * 清空磁盘缓存 / Clears the disk cache.
-   */
   async clearDiskCache(): Promise<void> {
+    this.cancelPending();
+    this.diskGeneration++;
+    if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    this.diskCacheDirty = false;
+    this.diskCache = this.createDiskCache();
+    this.diskCacheLoad = null;
     try {
-      if (this.flushTimer !== null) {
-        window.clearTimeout(this.flushTimer);
-        this.flushTimer = null;
-      }
-      this.diskCacheDirty = false;
-      this.diskCache?.clear();
-      this.diskCache = new Map();
-
-      if (await this.plugin.app.vault.adapter.exists(this.diskCachePath)) {
+      if (this.flushing) await this.flushing;
+      if (await this.plugin.app.vault.adapter.exists(this.diskCachePath))
         await this.plugin.app.vault.adapter.remove(this.diskCachePath);
-        console.log('[IconResolver] Disk cache cleared');
-      }
     } catch (error) {
-      console.error('[IconResolver] Failed to clear disk cache:', error);
+      logger.error('Failed to clear the icon cache', undefined, error);
     }
   }
 
-  /**
-   * 移除特定图标包的缓存 / Forgets every in-memory icon belonging to a pack.
-   */
   async removePackCache(packName: string): Promise<void> {
-    // 先收集该包的图标 id：磁盘缓存以 id 命名，entry 随 lookup 一起被删掉后就找不到了。
-    // Collect the pack's icon ids first: the disk cache is keyed by id, and those entries
-    // are gone once the lookup rows are removed.
-    const iconIds = new Set<string>();
-    for (const [key, located] of this.lookup) {
-      if (located.packName === packName) {
-        iconIds.add(located.entry.id);
-        this.lookup.delete(key);
-      }
+    this.cancelPending();
+    this.hotLookup.clear();
+    this.packs.delete(packName);
+    for (const cache of [this.memory, this.previews]) {
+      for (const [id, icon] of cache.entries)
+        if (icon.iconPackName === packName) cache.delete(id);
     }
-
-    for (const [key, value] of this.memoryCache) {
-      if (value.iconPackName === packName) {
-        this.memoryCache.delete(key);
-      }
-    }
-    for (const [key, value] of this.previews) {
-      if (value.iconPackName === packName) {
-        this.previews.delete(key);
-      }
-    }
-
-    // 磁盘缓存同样必须作废，否则下一次解析会在第 2 层命中旧内容。
-    // The disk tier must be invalidated too, or the next resolve hits stale markup.
-    if (iconIds.size > 0 && this.diskCache) {
-      for (const iconId of iconIds) {
-        this.diskCache.delete(iconId);
-      }
-      this.scheduleFlush();
-    }
+    const cache = await this.ensureDiskCacheLoaded();
+    if (this.disposed) return;
+    let changed = false;
+    for (const [id, value] of cache.entries)
+      if (value.packName === packName) changed = cache.delete(id) || changed;
+    if (changed) this.scheduleFlush();
   }
 
-  /**
-   * 获取缓存统计信息 / Cache statistics for diagnostics.
-   */
+  /** 卸载先失效所有任务，串行结束已开始的写盘，再释放引用。 / Invalidate work, finish writes, release references. */
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposed = true;
+    this.cancelPending();
+    if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+    this.disposal = this.flushDiskCache(true).then(() => {
+      this.diskGeneration++;
+      this.memory.clear();
+      this.previews.clear();
+      this.hotLookup.clear();
+      this.packs.clear();
+      this.diskCache?.clear();
+      this.diskCache = null;
+      this.diskCacheLoad = null;
+    });
+    return this.disposal;
+  }
+
   getCacheStats(): {
     memorySize: number;
     previewSize: number;
     lookupSize: number;
+    memoryBytes: number;
+    previewBytes: number;
+    diskSize: number;
+    diskBytes: number;
+    packCount: number;
+    inFlight: number;
   } {
+    let lookupSize = 0;
+    for (const pack of this.packs.values()) lookupSize += pack.lookup.length;
     return {
-      memorySize: this.memoryCache.size,
-      previewSize: this.previews.size,
-      lookupSize: this.lookup.size,
+      memorySize: this.memory.entries.size,
+      previewSize: this.previews.entries.size,
+      lookupSize,
+      memoryBytes: this.memory.bytes,
+      previewBytes: this.previews.bytes,
+      diskSize: this.diskCache?.entries.size ?? 0,
+      diskBytes: this.diskCache?.bytes ?? 0,
+      packCount: this.packs.size,
+      inFlight: this.inFlight.size,
     };
   }
 }
 
-/**
- * 提取 SVG viewBox / Extracts the SVG viewBox.
- */
-function extractViewBox(svgContent: string): string {
-  const match = svgContent.match(/viewBox=["']([^"']+)["']/i);
-  return match ? match[1] : '';
+function extractViewBox(markup: string): string {
+  return markup.match(/viewBox=["']([^"']+)["']/i)?.[1] ?? '';
 }
 
 export type { IconEntry };

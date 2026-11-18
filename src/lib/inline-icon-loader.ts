@@ -1,356 +1,246 @@
-/**
- * InlineIconLoader - 内联图标延迟加载器
- * Inline Icon Loader for deferred loading of :IconName: syntax in notes.
- *
- * 用于处理笔记中的 :IconName: 语法，采用批处理策略避免阻塞渲染。
- * Handles :IconName: syntax in notes with batching to avoid blocking render.
- */
-
-import IconizePlugin from '@app/main';
+/** 有界批处理只填充等待节点，不再重绘所有笔记。 / Bounded loading fills waiting nodes in place. */
+import type IconizePlugin from '@app/main';
+import { MarkdownView, sanitizeHTMLToDom } from 'obsidian';
+import { logger } from './logger';
+import { yieldToMain } from './task-scheduler';
 import svg from './util/svg';
 
+interface RenderOptions {
+  fontSize?: number;
+}
+
+const BATCH_LIMIT = 64;
+const CONCURRENCY = 2;
+const SLICE_MS = 4;
+const FAILED_LIMIT = 512;
+
 export class InlineIconLoader {
-  private plugin: IconizePlugin;
+  private readonly pending = new Set<string>();
+  private readonly failed = new Set<string>();
+  private readonly pendingElements = new Map<
+    string,
+    Map<HTMLElement, RenderOptions>
+  >();
+  private readonly pendingViews = new Map<string, Set<MarkdownView>>();
+  private timer: number | null = null;
+  private inFlight = false;
+  private generation = 0;
+  private disposed = false;
 
-  // 待处理的图标请求队列 / Pending icon requests queue.
-  private pending: Set<string>;
+  constructor(private readonly plugin: IconizePlugin) {}
 
-  // 加载失败的图标（避免重复尝试）/ Failed icons (avoid retries).
-  private failed: Set<string>;
-
-  // 批处理定时器 / Batch processing timer.
-  private timer: number | null;
-
-  // 是否正在处理 / Processing flag.
-  private inFlight: boolean;
-
-  // 批处理延迟（毫秒）/ Batch delay in milliseconds.
-  private batchDelayMs: number;
-
-  /**
-   * 等待填充的元素：图标 id → 引用它的那些节点。
-   * Elements awaiting markup: icon id to the nodes referencing it.
-   *
-   * 用于「链接悬停预览」这类**不是 markdown leaf 的容器**：它们不会被 `repaintOpenNotes`
-   * 重绘，所以短代码一旦留在原地就永远是文字。改为先放好占位节点、解析完成后直接填进去，
-   * 浮层无需重绘也能显示图标。
-   *
-   * This covers containers that are *not* markdown leaves, such as the page-preview
-   * popover: `repaintOpenNotes` never touches them, so a shortcode left in place would stay
-   * literal text forever. Placing a placeholder node up front and filling it once the icon
-   * resolves makes the popover show the icon without needing a repaint.
-   */
-  private pendingElements: Map<string, Set<HTMLElement>>;
-
-  /**
-   * 是否有调用方在等重绘 / Whether a caller is waiting on a repaint.
-   *
-   * 只有 `requestIcon` 这条「没有托管节点」的路径才需要重绘：它的调用方（Live Preview 的
-   * 装饰）是同步构建的，图标解析完成后只能靠一次重绘/重排才能显示出来。阅读视图的短代码
-   * 由 `fillElement` 直接填空，不依赖重绘。
-   *
-   * 整篇重绘会摧毁笔记里的交互式组件（输入焦点、滚动锚点、DataviewJS 实例），因此只在确实
-   * 有调用方在等的时候才做。
-   *
-   * Only the `requestIcon` path — which owns no node — needs a repaint: its callers (Live
-   * Preview decorations) are built synchronously and can only show a late icon after a
-   * re-render. Shortcodes in the reading view are filled in place by `fillElement` and depend
-   * on nothing. A full-note repaint tears down interactive components living in a note (input
-   * focus, scroll anchor, DataviewJS instances), so it only runs when a caller waits for it.
-   */
-  private needsRepaint: boolean;
-
-  constructor(plugin: IconizePlugin) {
-    this.plugin = plugin;
-    this.pending = new Set();
-    this.failed = new Set();
-    this.timer = null;
-    this.inFlight = false;
-    this.batchDelayMs = 60;
-    this.pendingElements = new Map();
-    this.needsRepaint = false;
-  }
-
-  /**
-   * 把一个占位节点登记为「解析完成后填进去」。
-   * Registers a placeholder node to be filled once its icon resolves.
-   *
-   * 与 `requestIcon` 的区别：`requestIcon` 只负责把图标取进内存，之后依赖调用方重绘；
-   * 这里的节点是**已经替换掉短代码**的占位元素，需要被直接写入标记。
-   *
-   * Unlike `requestIcon`, which only brings the icon into memory and relies on the caller to
-   * repaint, the node here has already replaced the shortcode and needs the markup written
-   * into it directly.
-   */
-  fillElement(element: HTMLElement, iconId: string): void {
+  fillElement(
+    element: HTMLElement,
+    iconId: string,
+    options: RenderOptions = {},
+  ): void {
     const resolver = this.plugin.iconResolver;
-    if (!resolver || !iconId) {
-      return;
-    }
-
-    const cached = resolver.peek(iconId);
+    if (this.disposed || !resolver || !iconId) return;
+    const located = resolver.find(iconId);
+    if (!located) return;
+    const key = located.entry.id;
+    const cached = resolver.peek(key);
     if (cached) {
-      this.renderInto(element, cached.svgElement);
+      this.renderInto(element, cached.svgElement, options.fontSize);
       return;
     }
-
-    // 只有确实存在于索引中的图标才值得等待。
-    if (!resolver.find(iconId)) {
-      return;
-    }
-
-    let elements = this.pendingElements.get(iconId);
+    if (this.failed.has(key)) return;
+    let elements = this.pendingElements.get(key);
     if (!elements) {
-      elements = new Set();
-      this.pendingElements.set(iconId, elements);
+      elements = new Map();
+      this.pendingElements.set(key, elements);
     }
-    elements.add(element);
-
-    this.pending.add(iconId);
+    elements.set(element, options);
+    this.pending.add(key);
     this.schedule();
   }
 
-  /**
-   * 把标记写入节点，字号对齐其父元素。
-   * Writes markup into a node, sized to match its parent.
-   */
-  private renderInto(element: HTMLElement, markup: string): void {
-    const parent = element.parentElement;
-    const parentFontSize = parent
-      ? parseFloat(getComputedStyle(parent).fontSize)
-      : NaN;
-
-    element.innerHTML = Number.isNaN(parentFontSize)
-      ? markup
-      : svg.setFontSize(markup, parentFontSize);
+  /** CodeMirror 销毁装饰时即可解除引用，不必等待慢盘。 / Release detached widgets before slow I/O finishes. */
+  releaseElement(element: HTMLElement, iconId: string): void {
+    const key = this.plugin.iconResolver?.find(iconId)?.entry.id ?? iconId;
+    const elements = this.pendingElements.get(key);
+    elements?.delete(element);
+    if (elements?.size === 0) {
+      this.pendingElements.delete(key);
+      if (!this.pendingViews.has(key)) this.pending.delete(key);
+    }
   }
 
-  /**
-   * 填充等待该图标的全部节点 / Fills every node waiting on this icon.
-   */
-  private flushPendingElements(iconId: string, markup: string): void {
-    const elements = this.pendingElements.get(iconId);
-    if (!elements) {
-      return;
+  private renderInto(
+    element: HTMLElement,
+    markup: string,
+    fontSize?: number,
+  ): void {
+    // 先清理 SVG 再用节点替换，避免 innerHTML 和跨窗口节点问题。
+    // Sanitize first, then replace owned children without innerHTML.
+    const fragment = sanitizeHTMLToDom(
+      fontSize ? svg.setFontSize(markup, fontSize) : markup,
+    );
+    if (!fontSize) {
+      const image = fragment.querySelector('svg');
+      image?.setAttribute('width', '1em');
+      image?.setAttribute('height', '1em');
     }
-    this.pendingElements.delete(iconId);
+    element.replaceChildren(fragment);
+  }
 
-    for (const element of elements) {
-      // 浮层可能已经关闭，节点已从文档移除。
-      // The popover may have closed, taking the node out of the document.
-      if (element.isConnected) {
-        this.renderInto(element, markup);
+  private async flushPendingElements(
+    iconId: string,
+    markup: string,
+    generation: number,
+  ): Promise<void> {
+    const elements = this.pendingElements.get(iconId);
+    if (!elements) return;
+    let deadline = performance.now() + SLICE_MS;
+    for (const [element, options] of elements) {
+      if (this.disposed || generation !== this.generation) return;
+      // 保留登记直至处理该节点，使 yield 期间的释放仍能取消它。
+      // Keep the registry live across yields so release can cancel unprocessed nodes.
+      elements.delete(element);
+      if (element.isConnected)
+        this.renderInto(element, markup, options.fontSize);
+      if (performance.now() >= deadline) {
+        await yieldToMain('user-visible');
+        deadline = performance.now() + SLICE_MS;
       }
     }
+    if (this.pendingElements.get(iconId) === elements && elements.size === 0)
+      this.pendingElements.delete(iconId);
   }
 
-  /**
-   * 请求加载图标（非阻塞）/ Request icon loading (non-blocking).
-   */
-  requestIcon(iconId: string): void {
-    if (!iconId) {
-      return;
-    }
-
-    if (this.failed.has(iconId)) {
-      return;
-    }
-
-    // 该图标已在队列里：它可能是被 `fillElement` 那一侧排进来的，但这次请求来自等重绘的
-    // 调用方，所以本批解析完成后仍然要重绘。
-    //
-    // Already queued: it may have been queued by the `fillElement` side, but this request comes
-    // from a caller that waits for a repaint, so the batch still has to repaint.
-    if (this.pending.has(iconId)) {
-      this.needsRepaint = true;
-      return;
-    }
-
+  /** 旧调用方可指定等待的视图；默认仅活动 Markdown 编辑器。 / Legacy callers refresh only their waiting editor. */
+  requestIcon(iconId: string, waitingView?: MarkdownView): void {
     const resolver = this.plugin.iconResolver;
-    if (!resolver) {
-      return;
+    if (this.disposed || !resolver || !iconId) return;
+    const located = resolver.find(iconId);
+    if (!located) return;
+    const key = located.entry.id;
+    if (this.failed.has(key) || resolver.peek(key)) return;
+    const view =
+      waitingView ??
+      this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+    if (view) {
+      let views = this.pendingViews.get(key);
+      if (!views) {
+        views = new Set();
+        this.pendingViews.set(key, views);
+      }
+      views.add(view);
     }
-
-    // 检查是否已加载到内存 / Check if already loaded.
-    if (resolver.peek(iconId)) {
-      return;
-    }
-
-    // 只有确实存在于索引中的图标才值得排队。短代码正则会顺带匹配到别的冒号文本
-    // （例如时间 `12:39:16` 里的 `:39:`、`:16:`），给它们排队只会刷出
-    // "Icon not found" 噪音——它们根本不是图标名。
-    //
-    // Only icons that really exist in the index are worth queueing. The shortcode regex
-    // also matches incidental colon-delimited text — the `:39:` and `:16:` inside a time
-    // like `12:39:16` — and queueing those only produces "Icon not found" noise.
-    if (!resolver.find(iconId)) {
-      return;
-    }
-
-    this.pending.add(iconId);
-    this.needsRepaint = true;
+    this.pending.add(key);
     this.schedule();
   }
 
-  /**
-   * 调度批处理（使用防抖）/ Schedule batch processing (with debouncing).
-   */
   private schedule(): void {
-    if (this.timer !== null || this.inFlight) {
+    if (
+      this.disposed ||
+      this.timer !== null ||
+      this.inFlight ||
+      !this.pending.size
+    )
       return;
-    }
-
+    const generation = this.generation;
     this.timer = window.setTimeout(() => {
       this.timer = null;
-      this.flush().catch((error) => {
-        console.error('[InlineIconLoader] Flush failed:', error);
+      if (this.disposed || generation !== this.generation) return;
+      void this.flush(generation).catch((error) => {
+        logger.error('Failed to load inline icons', undefined, error);
       });
-    }, this.batchDelayMs);
+    }, 24);
   }
 
-  /**
-   * 批量处理队列中的图标 / Batch process queued icons.
-   */
-  private async flush(): Promise<void> {
-    if (this.pending.size === 0) {
+  private async flush(generation: number): Promise<void> {
+    if (this.disposed || generation !== this.generation || !this.pending.size)
       return;
+    const icons: string[] = [];
+    for (const iconId of this.pending) {
+      this.pending.delete(iconId);
+      icons.push(iconId);
+      if (icons.length === BATCH_LIMIT) break;
     }
-
-    const icons = [...this.pending];
-    this.pending.clear();
-    // 本批是否需要重绘，必须在遍历前取走：批处理期间新到的请求属于下一批。
-    // Snapshot before the loop: requests arriving during the batch belong to the next one.
-    const needsRepaint = this.needsRepaint;
-    this.needsRepaint = false;
+    const repaint = new Set<MarkdownView>();
+    let next = 0;
     this.inFlight = true;
-
-    let loaded = 0;
-    const startTime = Date.now();
-
-    try {
-      for (const iconId of icons) {
+    const worker = async () => {
+      let deadline = performance.now() + SLICE_MS;
+      while (
+        !this.disposed &&
+        generation === this.generation &&
+        next < icons.length
+      ) {
+        const iconId = icons[next++];
         try {
-          const icon = await this.plugin.iconResolver.resolve(iconId, {
+          const icon = await this.plugin.iconResolver?.resolve(iconId, {
             persist: true,
           });
-
+          if (this.disposed || generation !== this.generation) return;
           if (icon) {
-            loaded++;
-            // 立刻填进等待它的节点，这份标记不依赖重绘。
-            // Fill the nodes waiting on it right away; this does not rely on a repaint.
-            this.flushPendingElements(iconId, icon.svgElement);
+            await this.flushPendingElements(
+              iconId,
+              icon.svgElement,
+              generation,
+            );
+            if (this.disposed || generation !== this.generation) return;
+            const views = this.pendingViews.get(iconId);
+            if (views) for (const view of views) repaint.add(view);
           } else {
             this.failed.add(iconId);
-            console.warn(`[InlineIconLoader] Icon not found: ${iconId}`);
+            if (this.failed.size > FAILED_LIMIT) {
+              const oldest = this.failed.values().next().value as
+                | string
+                | undefined;
+              if (oldest !== undefined) this.failed.delete(oldest);
+            }
+            this.pendingElements.delete(iconId);
           }
+          this.pendingViews.delete(iconId);
         } catch (error) {
-          console.error(`[InlineIconLoader] Failed to load ${iconId}:`, error);
-          this.failed.add(iconId);
+          if (!this.disposed && generation === this.generation)
+            logger.error('Failed to load an inline icon', undefined, error);
+        }
+        if (performance.now() >= deadline) {
+          await yieldToMain('user-visible');
+          deadline = performance.now() + SLICE_MS;
+        }
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+      if (!this.disposed && generation === this.generation) {
+        for (const view of repaint) {
+          // 不触碰阅读视图或其它笔记的组件；新 widget 已使用节点原位填充。
+          // No reading-view rerender: new widgets are populated directly.
+          const cm = (
+            view.editor as unknown as {
+              cm?: { dispatch(transaction: object): void };
+            }
+          )?.cm;
+          cm?.dispatch({});
         }
       }
     } finally {
       this.inFlight = false;
-    }
-
-    const elapsedMs = Date.now() - startTime;
-    console.log(
-      `[InlineIconLoader] Batch complete: ${loaded}/${icons.length} loaded in ${elapsedMs}ms`,
-    );
-
-    // 批次结束后释放归档字节：这一批可能刚打开过若干大包，不释放会一直占着内存。
-    // 需要时 `readEntry` 会重新打开。
-    //
-    // Release the archive bytes now the batch is done: it may have opened several large
-    // packs, and holding them costs memory until the plugin unloads. Sources reopen on the
-    // next read.
-    this.plugin.releaseIconSources();
-
-    // 重新渲染打开的笔记以显示新加载的图标。
-    // 只有等重绘的调用方（Live Preview 装饰）才需要：阅读视图的占位节点已经由
-    // `flushPendingElements` 填好，为一篇阅读视图做整篇重绘只会摧毁它里面的交互式组件。
-    //
-    // Re-render open notes to show loaded icons. Only callers that wait for a repaint (Live
-    // Preview decorations) need this: reading-view placeholders were already filled by
-    // `flushPendingElements`, and a full re-render would only tear down interactive components
-    // inside them.
-    if (loaded > 0 && needsRepaint) {
-      this.repaintOpenNotes();
-    }
-
-    // 处理批处理期间新增的请求 / Handle requests that arrived during batch.
-    if (this.pending.size > 0) {
       this.schedule();
     }
   }
 
-  /**
-   * 重新渲染打开的笔记 / Repaint open notes to show loaded icons.
-   */
-  private repaintOpenNotes(): void {
-    try {
-      const markdownLeaves =
-        this.plugin.app.workspace.getLeavesOfType('markdown');
-
-      for (const leaf of markdownLeaves) {
-        const view = leaf.view;
-        if (!view) {
-          continue;
-        }
-
-        try {
-          // 重新渲染预览模式 / Re-render preview mode.
-          if (
-            'previewMode' in view &&
-            (view as { previewMode?: { rerender: (full?: boolean) => void } })
-              .previewMode &&
-            typeof (
-              view as { previewMode: { rerender: (full?: boolean) => void } }
-            ).previewMode.rerender === 'function'
-          ) {
-            (
-              view as { previewMode: { rerender: (full?: boolean) => void } }
-            ).previewMode.rerender(true);
-          }
-
-          // 触发实时预览模式的重绘 / Trigger live preview repaint.
-          const editorView = (
-            view as { editor?: { cm?: { dispatch: (tr: unknown) => void } } }
-          ).editor?.cm;
-          if (editorView && editorView.dispatch) {
-            editorView.dispatch({});
-          }
-        } catch (error) {
-          console.warn('[InlineIconLoader] Failed to repaint a note:', error);
-        }
-      }
-    } catch (error) {
-      console.error('[InlineIconLoader] Failed to repaint open notes:', error);
-    }
-  }
-
-  /**
-   * 重置加载器状态（用于重新加载图标包后）/ Reset loader state.
-   */
   reset(): void {
+    this.generation++;
     this.pending.clear();
     this.failed.clear();
     this.pendingElements.clear();
-    this.needsRepaint = false;
-    // 不清 `inFlight` 会让加载器重置后永久拒绝调度新批次。
-    // Leaving `inFlight` set makes the loader refuse to schedule any further batch.
-    this.inFlight = false;
-
-    if (this.timer !== null) {
-      window.clearTimeout(this.timer);
-      this.timer = null;
-    }
-
-    console.log('[InlineIconLoader] Reset complete');
+    this.pendingViews.clear();
+    if (this.timer !== null) window.clearTimeout(this.timer);
+    this.timer = null;
+    // 旧批次可能仍等待 I/O，保持 inFlight 直到其 finally，避免重置后重叠加载。
+    // Keep the running lease until finally rather than overlapping old and new batches.
   }
 
-  /**
-   * 获取加载器统计信息 / Get loader statistics.
-   */
+  dispose(): void {
+    this.disposed = true;
+    this.reset();
+  }
+
   getStats(): { pending: number; failed: number; inFlight: boolean } {
     return {
       pending: this.pending.size,
@@ -359,12 +249,7 @@ export class InlineIconLoader {
     };
   }
 
-  /**
-   * 清除失败记录（允许重试）/ Clear failed records (allow retries).
-   */
   clearFailedList(): void {
-    const count = this.failed.size;
     this.failed.clear();
-    console.log(`[InlineIconLoader] Cleared ${count} failed icons`);
   }
 }

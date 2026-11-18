@@ -4,10 +4,15 @@ import { logger } from '@app/lib/logger';
 import style from './style';
 import svg from './svg';
 import emoji from '@app/emoji';
+import { sanitizeHTMLToDom } from 'obsidian';
 import {
   getSvgFromLoadedIcon,
   nextIdentifier,
 } from '@app/icon-pack-manager/util';
+
+// 每次绘制均有独立身份；旧解析结果不得覆盖较新的请求。 / Each render invalidates older asynchronous results.
+const renderRequests = new WeakMap<HTMLElement, object>();
+const coloredNodes = new WeakSet<HTMLElement>();
 
 /**
  * Removes the `iconize-icon` icon node from the provided HTMLElement.
@@ -35,6 +40,7 @@ const removeIconInNode = (el: HTMLElement): void => {
  * icon's container and overwrite it back — showing something other than what it should.
  */
 const clearIconIdentity = (node: HTMLElement): void => {
+  renderRequests.delete(node);
   node.removeAttribute(config.ICON_ATTRIBUTE_NAME);
   node.removeAttribute('title');
 };
@@ -102,10 +108,16 @@ const applyIconContent = (
     ? style.applyAll(plugin, content, node)
     : content;
   if (options.color) {
-    node.style.color = options.color;
+    node.setCssStyles({ color: options.color });
+    coloredNodes.add(node);
     iconContent = svg.colorize(iconContent, options.color);
+  } else if (coloredNodes.has(node)) {
+    // applyAll 已恢复全局颜色；仅在未应用全局样式时清除旧覆盖。
+    // applyAll restores the global color; otherwise remove the old override.
+    if (!options.shouldApplyAllStyles) node.setCssStyles({ color: '' });
+    coloredNodes.delete(node);
   }
-  node.innerHTML = iconContent;
+  node.replaceChildren(sanitizeHTMLToDom(iconContent));
   if (options.applyTitle !== false) {
     node.setAttribute('title', iconName);
   }
@@ -139,6 +151,8 @@ const setIconForNode = (
   node: HTMLElement,
   options?: SetIconForNodeOptions,
 ): void => {
+  const request = {};
+  renderRequests.set(node, request);
   options ??= {};
   options.shouldApplyAllStyles ??= true;
 
@@ -175,7 +189,10 @@ const setIconForNode = (
         // 节点可能已被复用去显示另一个图标——异步结果晚到时不能覆盖它。
         // The node may have been reused for a different icon; a late result must not
         // overwrite it.
-        if (node.getAttribute(config.ICON_ATTRIBUTE_NAME) !== iconName) {
+        if (
+          renderRequests.get(node) !== request ||
+          node.getAttribute(config.ICON_ATTRIBUTE_NAME) !== iconName
+        ) {
           return;
         }
         applyIconContent(plugin, icon.svgElement, node, options, iconName);

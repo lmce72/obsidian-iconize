@@ -192,6 +192,8 @@ export interface IconFolderSettings {
    * @default false
    */
   useInternalPlugins?: boolean;
+  /** 在 Notebook Navigator 中提供图标与菜单。 / Show icons and menu actions in Notebook Navigator. */
+  notebookNavigatorEnabled: boolean;
   // ===== PATCHED: 自定义配置文件目录 + Folder note 图标继承 / 双向同步 =====
   /**
    * Path of the config file that stores the plugin data (icons, rules, settings).
@@ -264,6 +266,7 @@ export const DEFAULT_SETTINGS: IconFolderSettings = {
   lucideIconPackType: 'native',
   debugMode: false,
   useInternalPlugins: false,
+  notebookNavigatorEnabled: true,
   // ===== PATCHED: 自定义配置文件目录 + Folder note 图标继承 / 双向同步 =====
   configFilePath: '.obsidian/plugins/obsidian-icon-folder/data.json',
   inheritFolderNoteIconEnabled: false,

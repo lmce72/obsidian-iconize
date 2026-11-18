@@ -7,6 +7,8 @@
 
 import { getNormalizedName } from '@app/icon-pack-manager/util';
 import { logger } from './logger';
+import { CompactIconIndex } from './compact-icon-index';
+import { throwIfAborted, yieldToMain } from './task-scheduler';
 import {
   IconSource,
   IconPackSourceType,
@@ -16,7 +18,7 @@ import {
 
 // ===== PATCHED: 索引类型定义 / Index types =====
 /** 索引格式版本，改动索引结构或命名规则时必须递增。 */
-export const ICON_PACK_INDEX_VERSION = 3;
+export const ICON_PACK_INDEX_VERSION = 4;
 
 /**
  * 图标包中的一个图标（不含 SVG 内容）/ A single icon inside a pack, without its SVG.
@@ -44,7 +46,7 @@ export interface IconPackIndex {
   sourceType: IconPackSourceType;
   fingerprint: SourceFingerprint;
   builtAt: number;
-  entries: IconEntry[];
+  entries: IconEntry[] | CompactIconIndex;
 }
 // ===== END PATCH =====
 
@@ -241,9 +243,12 @@ export async function buildIndex(
   packName: string,
   prefix: string,
   source: IconSource,
+  signal?: AbortSignal,
 ): Promise<IconPackIndex> {
+  throwIfAborted(signal);
   const raws = await source.listEntries();
-  const entries = resolveEntryIds(prefix, raws);
+  throwIfAborted(signal);
+  const entries = await resolveEntryIdsCompact(prefix, raws, signal);
   const fingerprint = await source.fingerprint();
 
   return {
@@ -262,6 +267,159 @@ export async function buildIndex(
   };
 }
 
+/** 保留历史命名顺序，用数值行号分组并合作式排序，避免百万对象图。
+ * Preserve historical naming with numeric row grouping and cooperative sorting. */
+export async function resolveEntryIdsCompact(
+  prefix: string,
+  raws: RawEntry[],
+  signal?: AbortSignal,
+): Promise<CompactIconIndex> {
+  throwIfAborted(signal);
+  let sorted = raws.slice();
+  let scratch = new Array<RawEntry>(raws.length);
+  let slice = performance.now();
+  const checkpoint = async () => {
+    await yieldToMain('background');
+    throwIfAborted(signal);
+    slice = performance.now();
+  };
+  // 小段原生排序、随后归并；不运行一次不可中断的百万项 Array.sort。
+  // Sort bounded runs, then merge instead of one uninterruptible million-row Array.sort.
+  const run = 256;
+  for (let start = 0; start < sorted.length; start += run) {
+    const end = Math.min(sorted.length, start + run);
+    const part = sorted
+      .slice(start, end)
+      .sort((a, b) => a.path.localeCompare(b.path));
+    for (let i = start; i < end; i++) sorted[i] = part[i - start];
+    if (performance.now() - slice >= 4) await checkpoint();
+  }
+  for (let width = run; width < sorted.length; width *= 2) {
+    for (let start = 0; start < sorted.length; start += width * 2) {
+      const middle = Math.min(sorted.length, start + width),
+        end = Math.min(sorted.length, start + width * 2);
+      let left = start,
+        right = middle;
+      for (let out = start; out < end; out++) {
+        scratch[out] =
+          right >= end ||
+          (left < middle &&
+            sorted[left].path.localeCompare(sorted[right].path) <= 0)
+            ? sorted[left++]
+            : sorted[right++];
+        if (out % 256 === 0 && performance.now() - slice >= 4)
+          await checkpoint();
+      }
+    }
+    [sorted, scratch] = [scratch, sorted];
+  }
+  scratch.length = 0;
+  let rootSegments: string[] | undefined;
+  const names: string[] = [];
+  let valid = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const path = sorted[i].path;
+    const segments = dirnameOf(path).split('/').filter(Boolean);
+    if (!rootSegments) rootSegments = segments;
+    else {
+      let same = 0;
+      while (
+        same < rootSegments.length &&
+        same < segments.length &&
+        rootSegments[same] === segments[same]
+      )
+        same++;
+      rootSegments.length = same;
+    }
+    const name = getNormalizedName(stripExtension(basenameOf(path)));
+    if (VALID_ICON_NAME.test(name)) {
+      names.push(name);
+      sorted[valid++] = sorted[i];
+    }
+    if (i % 128 === 0 && performance.now() - slice >= 4) await checkpoint();
+  }
+  sorted.length = valid;
+  const commonRoot = rootSegments?.length ? `${rootSegments.join('/')}/` : '';
+  const folder = (path: string) => {
+    const dir = dirnameOf(path);
+    return dir.startsWith(commonRoot.replace(/\/$/, ''))
+      ? dir.substring(commonRoot.length)
+      : dir;
+  };
+  let capacity = 1;
+  while (capacity < valid / 0.7) capacity *= 2;
+  const slots = new Uint32Array(capacity);
+  const hash = (key: string) => {
+    let value = 2166136261;
+    for (let i = 0; i < key.length; i++)
+      value = Math.imul(value ^ key.charCodeAt(i), 16777619);
+    return value >>> 0;
+  };
+  const slotFor = (key: string): number => {
+    let slot = hash(key) & (capacity - 1);
+    while (slots[slot] && names[slots[slot] - 1].toLowerCase() !== key)
+      slot = (slot + 1) & (capacity - 1);
+    return slot;
+  };
+  const duplicates = new Map<number, number[]>();
+  for (let row = 0; row < valid; row++) {
+    const slot = slotFor(names[row].toLowerCase());
+    if (!slots[slot]) slots[slot] = row + 1;
+    else {
+      const first = slots[slot] - 1;
+      const group = duplicates.get(first);
+      if (group) group.push(row);
+      else duplicates.set(first, [first, row]);
+    }
+    if (row % 128 === 0 && performance.now() - slice >= 4) await checkpoint();
+  }
+  let processedDuplicates = 0;
+  for (const rows of duplicates.values()) {
+    const first = folder(sorted[rows[0]].path).split('/');
+    const different = new Set<number>();
+    for (const row of rows) {
+      const segments = folder(sorted[row].path).split('/');
+      for (let i = 0; i < Math.max(first.length, segments.length); i++)
+        if ((first[i] ?? '') !== (segments[i] ?? '')) different.add(i);
+      if (++processedDuplicates % 128 === 0 && performance.now() - slice >= 4)
+        await checkpoint();
+    }
+    const indices = Array.from(different).sort((a, b) => a - b);
+    for (const row of rows) {
+      const segments = folder(sorted[row].path).split('/');
+      names[row] =
+        indices.map((i) => normalizeFolder(segments[i] ?? '')).join('') +
+        names[row];
+      if (++processedDuplicates % 128 === 0 && performance.now() - slice >= 4)
+        await checkpoint();
+    }
+  }
+  duplicates.clear();
+  slots.fill(0);
+  const occurrences = new Map<number, number>();
+  const entries = new CompactIconIndex(prefix, valid, signal);
+  for (let row = 0; row < valid; row++) {
+    const slot = slotFor(names[row].toLowerCase());
+    if (slots[slot]) {
+      const occurrence = (occurrences.get(slot) ?? 1) + 1;
+      occurrences.set(slot, occurrence);
+      names[row] += occurrence;
+    } else slots[slot] = row + 1;
+    const path = sorted[row].path,
+      name = names[row];
+    entries.append({
+      id: `${prefix}${name}`,
+      name,
+      path,
+      displayName: stripExtension(basenameOf(path)),
+      folder: folder(path),
+    });
+    if (row % 128 === 0 && performance.now() - slice >= 4) await checkpoint();
+  }
+  await entries.finish();
+  return entries;
+}
+
 /**
  * 把索引序列化为紧凑形式 / Serializes an index into its compact form.
  *
@@ -278,7 +436,7 @@ export async function buildIndex(
 export function serializeIndex(index: IconPackIndex): string {
   return JSON.stringify({
     ...index,
-    entries: index.entries.map((entry) => [entry.name, entry.path]),
+    entries: Array.from(index.entries, (entry) => [entry.name, entry.path]),
   });
 }
 

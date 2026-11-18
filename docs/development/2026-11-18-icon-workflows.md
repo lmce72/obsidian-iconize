@@ -12,7 +12,7 @@
 
 ## 嵌入格式
 
-默认格式是自包含 Base64 SVG 图片：`![LiHeart](data:image/svg+xml;base64,...)`。图标数据随 Markdown 文件携带，无需插件或外部附件；部分平台会限制 data URI，无法保证所有 Markdown 阅读器均支持。
+默认格式是自包含 Base64 SVG 图片。后续修正将输出改为 `<img alt="LiHeart" src="data:image/svg+xml;base64,..." width="16" height="16">`，使同一内容可用于普通 Markdown 正文和 `<div>` 等 HTML 块。旧版的 `![LiHeart](data:...)` 在 HTML 块中会作为文本显示；已有内容需要保持原 Base64 数据，将外层改成 `<img>`。图标数据随 Markdown 文件携带，无需插件或外部附件；部分平台会过滤 HTML 或限制 data URI，无法保证所有 Markdown 阅读器均支持。
 
 设置还支持原始 `<svg>` 元素和 SVG 文件引用。转换器始终输出可复制的 SVG 元素。文件引用模式在 Vault 根目录的 `Iconize SVG/` 保存资源，相同内容复用、不同内容另存；分享时需要携带资源文件。
 
@@ -44,3 +44,17 @@
 - 233 项测试通过，13 项沿用原项目跳过状态；类型检查、变更源码 ESLint（零警告）、全 src ESLint 错误检查和生产构建通过。
 
 最低 Obsidian 版本调整为 1.7.2，匹配当前使用的适配器原子处理 API；没有在旧版本应用或移动端真机上验证。未进行社区发布或额外的 source review 服务扫描。
+
+## 后续修正与 Notebook Navigator 兼容（源码工作区）
+
+- 颜色弹窗改用独立布局类，避免误继承自定义规则弹窗的横向 flex；实际色彩置于按钮内独立圆点，减少主题按钮背景覆盖。提供图标预览、色值、选择勾选标记、自定义颜色、恢复默认/取消/保存。窄容器下使用四列色板和换行按钮。
+- 设置新增“兼容 Notebook Navigator”，默认开启。通过官方 `api.menus.registerFileMenu`、`registerFolderMenu` 接入更改图标、更改颜色和移除图标。文件、文件夹与核心文件浏览器共用操作入口；即使多选，菜单也明确仅修改右键点击的项目。
+- Navigator 的公开 API 没有文件图标渲染扩展，因此使用独立适配类观察其已挂载的虚拟列表行。仅添加 Iconize 自有图标元素，原始图标节点保持完整；关闭兼容或卸载时撤下装饰并恢复原显示。
+- 图标按需解析，不同步整个图标库、不写入 Navigator 配置。读取 Iconize 已有记录、frontmatter、自定义规则（包含文件/文件夹范围）、folder note 继承与颜色。异步回填检查行身份，处理虚拟列表复用与重绘；关闭视图、禁用任一插件或热重载时释放观察器和菜单。
+- 对照本机 Notebook Navigator 3.5.1 的菜单实现和行标记；公开接口依据 [API reference](https://github.com/johansan/notebook-navigator/blob/main/docs/api-reference.md) 与 [类型定义](https://github.com/johansan/notebook-navigator/blob/main/src/api/public/notebook-navigator.d.ts)。渲染层依赖其 DOM 标记，将来 Navigator 改版时可能需要更新适配。
+- 用户要求先暂停测试。颜色/HTML 修正阶段的检查不代表 Navigator 兼容已验证；兼容测试应复制个人库中的 Notebook Navigator 插件目录到独立空测试库，保留个人配置与内容。
+- 兼容实现已完成 TypeScript 编译检查、变更模块 ESLint 与生产构建；尚未恢复运行期兼容测试，也未部署到个人库。前面的 234 项（包含 HTML 回归）单元检查发生在暂停测试之前，不能作为新适配层的验证结果。
+
+以上为暂停测试时的阶段记录。后续已恢复隔离验证，颜色弹窗新增 Lucide pin、可点击图标预览以及保留草稿的图标/颜色面板互切；测试结果见 [2.14.9 隔离验证记录](2026-11-18-validation.md)。前文的 2.14.8 交付记录保持独立。
+
+2.14.9 已加入 Obsidian ItemView 图标包管理，设置页或“打开图标包管理 / Open icon pack manager”命令可进入。支持 ZIP 导入、目录包创建与 SVG 添加、搜索及分页、删除确认；Fabp 完整发行包的 sprite 容器不再作为空图标导入。357 项机制单测及隔离应用冒烟通过，已部署至个人库，详情与回滚备份见上述验证记录。

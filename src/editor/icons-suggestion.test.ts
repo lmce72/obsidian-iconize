@@ -14,6 +14,14 @@ import * as util from '@app/util';
 import SuggestionIcon from './icons-suggestion';
 
 vi.mock('obsidian', () => ({
+  sanitizeHTMLToDom: (markup: string) => {
+    const fragment = document.createDocumentFragment();
+    const parsed = new DOMParser().parseFromString(markup, 'text/html');
+    fragment.append(...Array.from(parsed.body.childNodes));
+    return fragment;
+  },
+  Platform: { isDesktop: false },
+  FileSystemAdapter: class {},
   App: class {},
   Editor: class {},
   EditorPosition: class {},

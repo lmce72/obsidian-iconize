@@ -3,6 +3,7 @@ import predefinedIconPacks, { PredefinedIconPack } from '@app/icon-packs';
 import IconizePlugin from '@app/main';
 import { downloadZipFile } from '@app/zip-util';
 import { IconPack } from '@app/icon-pack-manager/icon-pack';
+import { logger } from '@app/lib/logger';
 
 export default class IconPackBrowserModal extends FuzzySuggestModal<PredefinedIconPack> {
   private plugin: IconizePlugin;
@@ -42,27 +43,30 @@ export default class IconPackBrowserModal extends FuzzySuggestModal<PredefinedIc
     );
   }
 
-  async onChooseItem(
+  onChooseItem(
     item: PredefinedIconPack,
     _event: MouseEvent | KeyboardEvent,
-  ): Promise<void> {
+  ): void {
+    void this.importPack(item);
+  }
+
+  private async importPack(item: PredefinedIconPack): Promise<void> {
     new Notice(`Adding ${item.displayName}...`);
-
-    const arrayBuffer = await downloadZipFile(item.downloadLink);
-    await this.plugin
-      .getIconPackManager()
-      .getFileManager()
-      .createZipFile(
-        this.plugin.getIconPackManager().getPath(),
-        `${item.name}.zip`,
-        arrayBuffer,
+    try {
+      const arrayBuffer = await downloadZipFile(item.downloadLink);
+      // 统一由管理器暂存、校验与提交，不能在验证前先覆盖目标 ZIP。
+      // The manager stages, validates and commits; never overwrite the destination first.
+      await this.plugin
+        .getIconPackManager()
+        .registerIconPack(item.name, arrayBuffer);
+      new Notice(`${item.displayName} added`);
+      this.onAddedIconPack();
+    } catch (error) {
+      logger.error('Could not import the selected icon pack', undefined, error);
+      new Notice(
+        `Could not add ${item.displayName}. ${error instanceof Error ? error.message : 'Please try again.'}`,
       );
-    await this.plugin
-      .getIconPackManager()
-      .registerIconPack(item.name, arrayBuffer);
-
-    new Notice(`...${item.displayName} added`);
-    this.onAddedIconPack();
+    }
   }
 
   renderSuggestion(
@@ -71,6 +75,7 @@ export default class IconPackBrowserModal extends FuzzySuggestModal<PredefinedIc
   ): void {
     super.renderSuggestion(item, el);
 
-    el.innerHTML = `<div>${el.innerHTML}</div>`;
+    const children = Array.from(el.childNodes);
+    el.createDiv().append(...children);
   }
 }

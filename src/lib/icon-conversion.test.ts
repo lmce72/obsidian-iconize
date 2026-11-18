@@ -77,14 +77,36 @@ describe('icon conversion pipeline', () => {
   it('embeds self-contained Base64 and leaves missing icons and literal code intact', async () => {
     const f = fixture();
     await f.conversion.convertEditor(f.editor);
-    expect(f.state.text).toMatch(/^!\[One\]\(data:image\/svg\+xml;base64,/);
+    expect(f.state.text).toMatch(
+      /^<img alt="One" src="data:image\/svg\+xml;base64,/,
+    );
     expect(f.state.text).toContain(':Missing: `:One:`');
-    const encoded = /base64,([^)]*)/.exec(f.state.text)![1];
+    const encoded = /base64,([^"]*)/.exec(f.state.text)![1];
     expect(window.atob(encoded)).toContain(
       'xmlns="http://www.w3.org/2000/svg"',
     );
     expect(window.atob(encoded)).toContain('stroke="#808080"');
     expect(f.editor.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('embeds images in HTML containers as well as Markdown prose', async () => {
+    const f = fixture();
+    f.state.text =
+      '<div class="home-center-show-text-2">:One: | text</div>\n\n:One:';
+    expect(await f.conversion.convertEditor(f.editor)).toBe(2);
+    const parsed = new DOMParser().parseFromString(f.state.text, 'text/html');
+    const images = parsed.querySelectorAll('img');
+    expect(images).toHaveLength(2);
+    expect(images[0].parentElement?.className).toBe('home-center-show-text-2');
+    for (const image of images) {
+      expect(image.getAttribute('src')).toMatch(
+        /^data:image\/svg\+xml;base64,/,
+      );
+      expect(image.getAttribute('alt')).toBe('One');
+      expect(image.getAttribute('width')).toBe('16');
+      expect(image.getAttribute('height')).toBe('16');
+    }
+    expect(await f.conversion.convertEditor(f.editor)).toBe(0);
   });
 
   it('supports readable SVG output without Base64', async () => {

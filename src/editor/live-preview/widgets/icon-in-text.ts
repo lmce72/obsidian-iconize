@@ -8,6 +8,7 @@ import {
 } from '@app/lib/util/text';
 import IconizePlugin from '@app/main';
 import { EditorView, WidgetType } from '@codemirror/view';
+import { sanitizeHTMLToDom } from 'obsidian';
 
 export class IconInTextWidget extends WidgetType {
   private start = -1;
@@ -57,30 +58,31 @@ export class IconInTextWidget extends WidgetType {
   }
 
   toDOM(view: EditorView) {
-    const wrap = createSpan({
-      cls: 'cm-iconize-icon',
-      attr: {
-        'aria-label': this.id,
-        'data-icon': this.id,
-        'data-iconize-from': String(this.start),
-        'aria-hidden': 'true',
-      },
-    });
+    const wrap = view.dom.ownerDocument.createElement('span');
+    wrap.classList.add('cm-iconize-icon');
+    wrap.setAttribute('aria-label', this.id);
+    wrap.setAttribute('data-icon', this.id);
+    wrap.setAttribute('data-iconize-from', String(this.start));
+    wrap.setAttribute('aria-hidden', 'true');
 
     const foundIcon = icon.getIconByName(this.plugin, this.id);
     const fontSize = this.getSize(view);
 
     if (foundIcon) {
       const svgElement = svg.setFontSize(foundIcon.svgElement, fontSize);
-      wrap.style.display = 'inline-flex';
-      wrap.style.transform = 'translateY(13%)';
-      wrap.innerHTML = svgElement;
+      wrap.replaceChildren(sanitizeHTMLToDom(svgElement));
     } else if (emoji.isEmoji(this.id)) {
-      wrap.innerHTML = emoji.parseEmoji(
-        this.plugin.getSettings().emojiStyle,
-        this.id,
-        fontSize,
+      wrap.replaceChildren(
+        sanitizeHTMLToDom(
+          emoji.parseEmoji(
+            this.plugin.getSettings().emojiStyle,
+            this.id,
+            fontSize,
+          ),
+        ),
       );
+    } else if (this.plugin.iconResolver?.find(this.id)) {
+      this.plugin.inlineIconLoader?.fillElement(wrap, this.id, { fontSize });
     } else {
       wrap.append(
         `${this.plugin.getSettings().iconIdentifier}${this.id}${
@@ -90,6 +92,10 @@ export class IconInTextWidget extends WidgetType {
     }
 
     return wrap;
+  }
+
+  destroy(dom: HTMLElement): void {
+    this.plugin.inlineIconLoader?.releaseElement(dom, this.id);
   }
 
   ignoreEvent(): boolean {

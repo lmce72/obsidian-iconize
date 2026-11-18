@@ -48,24 +48,18 @@ export const buildLinkDecorations = (
             if (file) {
               const possibleIcon = icon.getIconByPath(plugin, file.path);
 
-              if (!possibleIcon) {
-                // 按需加载：图标可能尚未解析。这里无法等待（同步装饰构建），
-                // 因此排入加载队列，解析完成后由内联加载器重绘并重建装饰。
-                //
-                // The icon may not be resolved yet. This path cannot await, so queue the
-                // load; the inline loader repaints once it resolves and the decoration is
-                // rebuilt then.
-                const iconName = icon.getByPath(plugin, file.path);
-                if (iconName) {
-                  plugin.inlineIconLoader?.requestIcon(iconName);
-                }
-              }
+              const iconName = icon.getByPath(plugin, file.path);
+              const data =
+                possibleIcon ??
+                (iconName && plugin.iconResolver?.find(iconName)
+                  ? iconName
+                  : null);
 
-              if (possibleIcon) {
+              if (data) {
                 const iconDecoration = Decoration.widget({
                   widget: new IconInLinkWidget(
                     plugin,
-                    possibleIcon,
+                    data,
                     file.path,
                     headerType,
                   ),

@@ -9,6 +9,7 @@ import {
   Menu,
   Editor,
   Modal,
+  TAbstractFile,
 } from 'obsidian';
 import {
   EditorWithEditorComponent,
@@ -16,7 +17,12 @@ import {
   InlineTitleView,
   TabHeaderLeaf,
 } from './@types/obsidian';
-import IconsPickerModal from './ui/icons-picker-modal';
+import { IconEditSession } from './ui/icon-edit-session';
+import {
+  ICON_MANAGEMENT_VIEW_TYPE,
+  IconManagementView,
+  openIconManagementView,
+} from './views/icon-management-view';
 import { DEFAULT_SETTINGS, IconFolderSettings } from '@app/settings/data';
 import { migrate } from '@app/migrations';
 import IconFolderSettingsUI from './settings/ui';
@@ -62,7 +68,6 @@ import {
   processIconInTextMarkdown,
   processIconInLinkMarkdown,
 } from './editor/markdown-processors';
-import ChangeColorModal from './ui/change-color-modal';
 import { logger } from './lib/logger';
 import { EventEmitter } from './lib/event/event';
 import IconizeAPI, { getApi } from './lib/api';
@@ -72,6 +77,7 @@ import { IconConversion } from './lib/icon-conversion';
 import { findIconTags } from './lib/icon-tags';
 import IconConverterModal from './ui/icon-converter-modal';
 import ConfigRecoveryModal from './ui/config-recovery-modal';
+import NotebookNavigatorIntegration from './integrations/notebook-navigator';
 // ===== PATCHED: 按需加载系统 / Lazy loading system =====
 import { IconResolver } from './lib/icon-resolver';
 import { InlineIconLoader } from './lib/inline-icon-loader';
@@ -94,6 +100,12 @@ export interface FolderIconObject {
 
 export default class IconizePlugin extends Plugin {
   public conversion = new IconConversion(this);
+  private iconLoadingAbort = new AbortController();
+  private iconLoadingComplete = false;
+  public isIconLoadingComplete(): boolean {
+    return this.iconLoadingComplete;
+  }
+  private notebookNavigator?: NotebookNavigatorIntegration;
   private openModals = new Set<Modal>();
   public trackModal(modal: Modal): void {
     this.openModals.add(modal);
@@ -191,6 +203,20 @@ export default class IconizePlugin extends Plugin {
    * message has to be on screen — otherwise the user is left with nothing to diagnose.
    */
   async onload() {
+    this.registerView(
+      ICON_MANAGEMENT_VIEW_TYPE,
+      (leaf) => new IconManagementView(leaf, this),
+    );
+    this.addCommand({
+      id: 'open-icon-manager',
+      name: '打开图标包管理 / Open icon pack manager',
+      callback: () => {
+        void openIconManagementView(this).catch((error: unknown) => {
+          logger.error('Could not open the icon pack manager', undefined, error);
+          new Notice('Iconize：无法打开图标包管理。');
+        });
+      },
+    });
     this.register(() => {
       for (const modal of this.openModals) modal.close();
       this.openModals.clear();
@@ -206,6 +232,9 @@ export default class IconizePlugin extends Plugin {
         }`,
         0,
       );
+    } finally {
+      this.iconLoadingComplete = true;
+      if (!this.unloading) this.eventEmitter.emit('allIconsLoaded');
     }
   }
 
@@ -318,6 +347,10 @@ export default class IconizePlugin extends Plugin {
       );
     }
 
+    if (this.unloading) return;
+    this.notebookNavigator = this.addChild(
+      new NotebookNavigatorIntegration(this),
+    );
     this.app.workspace.onLayoutReady(() => this.handleChangeLayout());
 
     this.addCommand({
@@ -500,55 +533,9 @@ export default class IconizePlugin extends Plugin {
     );
 
     this.registerEvent(
-      this.app.workspace.on('file-menu', (menu, file: TFile) => {
-        const addIconMenuItem = (item: MenuItem) => {
-          item.setTitle('Change icon');
-          item.setIcon('hashtag');
-          item.onClick(() => {
-            this.openIconPicker(file.path);
-          });
-        };
-
-        const removeIconMenuItem = (item: MenuItem) => {
-          item.setTitle('Remove icon');
-          item.setIcon('trash');
-          item.onClick(async () => {
-            await this.removeSingleIcon(file);
-          });
-        };
-
-        const changeColorOfIcon = (item: MenuItem) => {
-          item.setTitle('Change color of icon');
-          item.setIcon('palette');
-          item.onClick(() => {
-            const modal = new ChangeColorModal(this.app, this, file.path);
-            modal.open();
-          });
-        };
-
-        menu.addItem(addIconMenuItem);
-
-        const filePathData = this.getData()[file.path];
-        const hasNestedIcon =
-          typeof filePathData === 'object' &&
-          (filePathData as FolderIconObject).iconName !== null;
-        // Only add remove icon menu item when the file path exists in the data.
-        // We do not want to show this menu item for e.g. custom rules.
-        if (
-          filePathData &&
-          (typeof filePathData === 'string' || hasNestedIcon)
-        ) {
-          const icon =
-            typeof filePathData === 'string'
-              ? filePathData
-              : (filePathData as FolderIconObject).iconName;
-          if (!emoji.isEmoji(icon)) {
-            menu.addItem(changeColorOfIcon);
-          }
-
-          menu.addItem(removeIconMenuItem);
-        }
-      }),
+      this.app.workspace.on('file-menu', (menu, file) =>
+        this.addIconizeMenuItems((configure) => menu.addItem(configure), file),
+      ),
     );
 
     this.registerIconPathEvents();
@@ -595,7 +582,15 @@ export default class IconizePlugin extends Plugin {
    * saying so. Report the failure instead.
    */
   private async initLazyLoading(usedIconNames: string[]): Promise<void> {
-    const system = await initializeLazyLoading(this, usedIconNames);
+    const system = await initializeLazyLoading(
+      this,
+      usedIconNames,
+      this.iconLoadingAbort.signal,
+    );
+    if (this.unloading || this.iconLoadingAbort.signal.aborted) {
+      if (system) cleanupLazyLoading(system);
+      return;
+    }
     if (!system) {
       new Notice(
         `[${config.PLUGIN_NAME}] Icon loading could not be initialised. See the console for details.`,
@@ -623,10 +618,9 @@ export default class IconizePlugin extends Plugin {
    * the "open, then update tabs and title on select" logic exists once.
    */
   public openIconPicker(path: string): void {
-    const modal = new IconsPickerModal(this.app, this, path);
-    modal.open();
+    const session = new IconEditSession(this.app, this, path);
 
-    modal.onSelect = (iconName: string): void => {
+    session.onSelect = (iconName: string): void => {
       IconCache.getInstance().set(path, { iconNameWithPrefix: iconName });
 
       // Update icon in tab when setting is enabled.
@@ -642,6 +636,7 @@ export default class IconizePlugin extends Plugin {
         this.addIconInTitle(iconName);
       }
     };
+    session.openPicker();
   }
   // ===== END PATCH =====
 
@@ -764,6 +759,7 @@ export default class IconizePlugin extends Plugin {
   // ===== END PATCH =====
 
   public notifyPlugins(): void {
+    this.notebookNavigator?.refresh();
     this.modifiedInternalPlugins.forEach((internalPlugin) => {
       if (internalPlugin.enabled) {
         internalPlugin.onMount();
@@ -771,7 +767,23 @@ export default class IconizePlugin extends Plugin {
     });
   }
 
-  private async removeSingleIcon(file: TFile, persist = true): Promise<void> {
+  private async removeSingleIcon(
+    file: TAbstractFile,
+    persist = true,
+  ): Promise<void> {
+    if (
+      persist &&
+      file instanceof TFile &&
+      this.getFrontmatterIcon(file.path)
+    ) {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        delete frontmatter[this.getSettings().iconInFrontmatterFieldName];
+        delete frontmatter[this.getSettings().iconColorInFrontmatterFieldName];
+      });
+      this.refreshFrontmatterIcon(file);
+      this.notifyPlugins();
+      return;
+    }
     this.removeFolderIcon(file.path, persist);
     dom.removeIconInPath(file.path);
     IconCache.getInstance().invalidate(file.path);
@@ -834,6 +846,7 @@ export default class IconizePlugin extends Plugin {
   }
 
   private handleChangeLayout(): void {
+    this.notebookNavigator?.refresh();
     // Transform data that are objects to single strings.
     const data = Object.entries(this.data) as [
       string,
@@ -1273,6 +1286,9 @@ export default class IconizePlugin extends Plugin {
   }
 
   onunload() {
+    this.iconLoadingAbort.abort();
+    this.notebookNavigator?.unload();
+    this.notebookNavigator = undefined;
     this.conversion.dispose();
     console.log('unloading obsidian-icon-folder');
     this.unloading = true;
@@ -1293,6 +1309,7 @@ export default class IconizePlugin extends Plugin {
     // Release every parsed archive and drop the debug global: it keeps the whole plugin
     // instance (and its archives) alive, which matters when disabling without a reload.
     for (const pack of this.iconPackManager?.getIconPacks() ?? []) {
+      pack.getSource()?.cancel?.();
       pack.getSource()?.dispose();
     }
     const globalScope = window as unknown as { iconizePlugin?: IconizePlugin };
@@ -1461,6 +1478,7 @@ export default class IconizePlugin extends Plugin {
   }
 
   private refreshFrontmatterIcon(file: TFile): void {
+    this.notebookNavigator?.refresh();
     IconCache.getInstance().invalidate(file.path);
     this._refreshFileExplorerIcon(file.path);
     for (const opened of getAllOpenedFiles(this)) {
@@ -1534,6 +1552,7 @@ export default class IconizePlugin extends Plugin {
       const openedFile = this.app.vault.getAbstractFileByPath(opened.path);
       if (openedFile instanceof TFile) this.refreshFrontmatterIcon(openedFile);
     }
+    this.notebookNavigator?.refresh();
   }
 
   /** 图标和颜色作为一次选择保存，兼容 frontmatter 覆盖。 / Save icon and color together, including frontmatter overrides. */
@@ -1800,6 +1819,56 @@ export default class IconizePlugin extends Plugin {
     return this.data.settings as IconFolderSettings;
   }
 
+  /** 两种文件浏览器共用操作，始终只更改明确点击的项目。 / Shared actions target the clicked entry in either explorer. */
+  public addIconizeMenuItems(
+    addItem: (configure: (item: MenuItem) => void) => void,
+    file: TAbstractFile,
+  ): void {
+    addItem((item) =>
+      item
+        .setTitle('更改此项目的 Iconize 图标')
+        .setIcon('image')
+        .onClick(() => this.openIconPicker(file.path)),
+    );
+    const id =
+      icon.getByPath(this, file.path) ||
+      getFolderNoteInheritedIcon(this, file.path);
+    if (id && !emoji.isEmoji(id)) {
+      addItem((item) =>
+        item
+          .setTitle('更改此项目的 Iconize 图标颜色')
+          .setIcon('palette')
+          .onClick(() =>
+            new IconEditSession(this.app, this, file.path).openColor(),
+          ),
+      );
+    }
+    const own = this.getData()[file.path];
+    const hasOwn =
+      typeof own === 'string' ||
+      (own &&
+        typeof own === 'object' &&
+        'iconName' in own &&
+        typeof own.iconName === 'string');
+    if (hasOwn || this.getFrontmatterIcon(file.path)) {
+      addItem((item) =>
+        item
+          .setTitle('移除此项目的 Iconize 图标')
+          .setIcon('trash')
+          .onClick(() => {
+            void this.removeSingleIcon(file).catch((error: unknown) => {
+              logger.error(
+                '[Iconize] Could not remove icon:',
+                undefined,
+                error,
+              );
+              new Notice('Iconize：移除失败，请检查配置状态。');
+            });
+          }),
+      );
+    }
+  }
+
   /** 标题与编辑器使用原生菜单，避免额外 DOM 耦合。 / Native menus keep UI modules decoupled. */
   public openTitleIconMenu(path: string, event?: MouseEvent): void {
     const menu = new Menu();
@@ -1813,7 +1882,7 @@ export default class IconizePlugin extends Plugin {
       item
         .setTitle('更改图标颜色 / Change icon color')
         .setIcon('palette')
-        .onClick(() => new ChangeColorModal(this.app, this, path).open()),
+        .onClick(() => new IconEditSession(this.app, this, path).openColor()),
     );
     menu.addItem((item) =>
       item
@@ -2186,6 +2255,7 @@ export default class IconizePlugin extends Plugin {
   }
 
   async saveIconFolderData(): Promise<void> {
+    this.notebookNavigator?.refresh();
     if (
       this.initializing ||
       this.unloading ||
@@ -2502,6 +2572,7 @@ export default class IconizePlugin extends Plugin {
 
   private refreshConfiguredIcons(previous: ConfigData = {}): void {
     if (this.unloading) return;
+    this.notebookNavigator?.refresh();
     IconCache.getInstance().clear();
     const paths = new Set([
       ...Object.keys(previous),

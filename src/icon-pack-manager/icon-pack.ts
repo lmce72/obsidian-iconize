@@ -4,6 +4,7 @@ import IconizePlugin from '@app/main';
 import { Icon } from '.';
 import { IconEntry, IconPackIndex } from '@app/lib/icon-indexing';
 import { IconSource } from '@app/lib/icon-sources';
+import { CompactIconIndex } from '@app/lib/compact-icon-index';
 
 /**
  * 一个已安装的图标包 / One installed icon pack.
@@ -27,10 +28,7 @@ export class IconPack {
   private icons: Icon[];
 
   /** 索引条目 / Index entries. */
-  private entries: IconEntry[];
-
-  /** 按小写 id 与裸名索引的查找表 / Lookup by lowercased id and bare name. */
-  private byKey: Map<string, IconEntry>;
+  private entries: CompactIconIndex;
 
   private prefix: string;
 
@@ -49,9 +47,8 @@ export class IconPack {
     prefix?: string,
   ) {
     this.icons = [];
-    this.entries = [];
-    this.byKey = new Map();
     this.prefix = prefix ?? this.generatePrefix();
+    this.entries = new CompactIconIndex(this.prefix);
   }
 
   private generatePrefix(): string {
@@ -114,47 +111,49 @@ export class IconPack {
   /**
    * 用新建或加载到的索引替换图标包内容 / Replaces the pack's contents with an index.
    */
-  public setIndex(index: IconPackIndex | IconEntry[]): void {
-    this.entries = Array.isArray(index) ? index : index.entries;
-    this.byKey = new Map();
-
-    for (const entry of this.entries) {
-      this.registerEntry(entry);
-    }
-  }
-
-  private registerEntry(entry: IconEntry): void {
-    this.byKey.set(entry.id.toLowerCase(), entry);
-    const nameKey = entry.name.toLowerCase();
-    if (!this.byKey.has(nameKey)) this.byKey.set(nameKey, entry);
+  public setIndex(index: IconPackIndex | IconEntry[] | CompactIconIndex): void {
+    const entries =
+      index instanceof CompactIconIndex || Array.isArray(index)
+        ? index
+        : index.entries;
+    this.entries =
+      entries instanceof CompactIconIndex
+        ? entries
+        : CompactIconIndex.fromEntriesSync(entries);
   }
 
   /** 大包的启动登记分片执行。 / Register large packs cooperatively at startup. */
   public async loadIndex(index: IconPackIndex): Promise<void> {
-    this.entries = index.entries;
-    this.byKey = new Map();
-    let count = 0;
-    let start = performance.now();
-    for (const entry of this.entries) {
-      this.registerEntry(entry);
-      if (++count % 256 === 0 && performance.now() - start >= 8) {
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-        start = performance.now();
-      }
-    }
+    this.entries =
+      index.entries instanceof CompactIconIndex
+        ? index.entries
+        : await CompactIconIndex.fromEntries(index.entries);
   }
 
   /**
    * 按 id 或裸名查找条目 / Looks an entry up by its full id or by its bare name.
    */
   public getEntry(nameOrId: string): IconEntry | undefined {
-    return this.byKey.get(nameOrId.toLowerCase());
+    return this.entries.getEntry(nameOrId);
   }
 
   /**
    * 该图标包的全部条目 / Every entry in the pack, as metadata.
    */
   public getEntries(): IconEntry[] {
+    return Array.from(this.entries);
+  }
+
+  /** 内部检索使用紧凑表；显式的旧列表 API 仍返回数组。 / Internal compact access; retain the legacy array API. */
+  public getCompactIndex(): CompactIconIndex {
+    return this.entries;
+  }
+
+  /** 解析器共享此包的查找器，避免再次为百万条目登记两个字符串键。 / Share the pack lookup with the resolver. */
+  public getEntryLookup(): {
+    length: number;
+    getEntry(query: string): IconEntry | undefined;
+  } {
     return this.entries;
   }
 
@@ -246,7 +245,7 @@ export class IconPack {
    */
   public getIcons(): Icon[] {
     if (this.entries.length > 0) {
-      return this.entries.map((entry) => this.toMetadataIcon(entry));
+      return Array.from(this.entries, (entry) => this.toMetadataIcon(entry));
     }
 
     return this.icons;

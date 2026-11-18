@@ -8,8 +8,34 @@
  */
 
 import { ZipDirectory } from './zip-directory';
-import { DataAdapter } from 'obsidian';
+import { DataAdapter, Platform } from 'obsidian';
 import { logger } from './logger';
+import { ZipCache, ZipOpenGate } from './zip-cache';
+import {
+  createDesktopZipReader,
+  ZipSourceChangedError,
+} from './zip-range-reader';
+import { yieldToMain } from './task-scheduler';
+
+// 整个插件共享预算，不能每包各自允许几十 MiB。 / One budget across all sources, not one allowance per pack.
+const archiveCache = new ZipCache<ZipSource, ZipDirectory>(
+  (Platform.isDesktop ? 64 : 32) * 1024 * 1024,
+);
+const archiveOpenGate = new ZipOpenGate(Platform.isDesktop ? 2 : 1);
+let archiveIdleTimer: number | null = null;
+function keepArchive(source: ZipSource, directory: ZipDirectory): void {
+  archiveCache.set(source, directory, directory.residentBytes);
+  touchArchives();
+}
+function touchArchives(): void {
+  if (archiveIdleTimer !== null) window.clearTimeout(archiveIdleTimer);
+  archiveIdleTimer = archiveCache.residentBytes
+    ? window.setTimeout(() => {
+        archiveIdleTimer = null;
+        archiveCache.clear();
+      }, 15000)
+    : null;
+}
 
 // ===== PATCHED: 图标源类型定义 / Icon source types =====
 /** 源中的一个条目，尚未应用命名规则 / An entry as discovered by a source. */
@@ -40,6 +66,7 @@ export interface IconSource {
   readEntry(path: string): Promise<string | null>;
   fingerprint(): Promise<SourceFingerprint>;
   dispose(): void;
+  cancel?(): void;
 }
 // ===== END PATCH =====
 
@@ -50,12 +77,11 @@ export interface IconSource {
 export class ZipSource implements IconSource {
   public readonly type = 'zip' as const;
 
-  /**
-   * 归档的原始字节，读取后保留以复用。存 Promise 而非结果，使并发调用共享同一次读取。
-   * Raw archive bytes, kept after the first read. A promise so concurrent callers share
-   * one read.
-   */
+  /** 仅保留正在执行的打开操作，完成后的驻留归全局 LRU 管理。 / Keep only in-flight opens outside the global LRU. */
   private archive: Promise<ZipDirectory> | null = null;
+  private listing: Promise<RawEntry[]> | null = null;
+  private generation = 0;
+  private closed = false;
 
   constructor(
     private readonly adapter: DataAdapter,
@@ -63,35 +89,39 @@ export class ZipSource implements IconSource {
     private readonly extraPath = '',
   ) {}
 
-  private open(): Promise<ZipDirectory> {
-    if (this.archive === null) {
-      this.archive = this.adapter
-        .readBinary(this.zipPath)
-        .then((buffer) => ZipDirectory.open(new Uint8Array(buffer)));
-
-      // 读取失败不能缓存，否则之后每次读取都会失败。
-      // A failed read must not be cached, otherwise every later read fails too.
-      this.archive.catch(() => {
-        this.archive = null;
-      });
+  private open(collectNames = false): Promise<ZipDirectory> {
+    if (this.closed) return Promise.reject(new Error('ZIP source is closed'));
+    const cached = archiveCache.get(this);
+    if (cached) {
+      touchArchives();
+      return Promise.resolve(cached);
     }
-
-    return this.archive;
-  }
-
-  /**
-   * 归档中全部条目的名称 / Every entry name in the archive.
-   *
-   * `filter` 对每个条目都会被调用，返回 `false` 即跳过解压——因此这里只走一遍归档末尾的
-   * 中央目录，不碰任何压缩数据。这是整套按需加载成立的前提：数千个图标的名字只花一次
-   * 目录遍历的代价。
-   *
-   * `filter` runs per entry, and returning `false` skips inflation — so this walks only the
-   * central directory at the end of the archive and never touches compressed data. That is
-   * what makes the whole scheme work: thousands of names for one directory pass.
-   */
-  private async listNames(): Promise<string[]> {
-    return Array.from((await this.open()).entries.keys());
+    if (this.archive) return this.archive;
+    const generation = this.generation;
+    const pending = archiveOpenGate.run(async () => {
+      if (this.closed) throw new Error('ZIP source is closed');
+      const reader = await createDesktopZipReader(this.adapter, this.zipPath);
+      const directory = reader
+        ? await ZipDirectory.openReader(
+            { ...reader, cancelled: () => this.closed },
+            collectNames,
+          )
+        : await ZipDirectory.open(
+            new Uint8Array(await this.adapter.readBinary(this.zipPath)),
+            collectNames,
+            () => this.closed,
+          );
+      if (!collectNames && generation === this.generation)
+        keepArchive(this, directory);
+      return directory;
+    });
+    this.archive = pending;
+    const clearPending = () => {
+      // 旧一代完成时不能清除新一代正在执行的读取。 / Older work must not clear a newer open.
+      if (this.archive === pending) this.archive = null;
+    };
+    void pending.then(clearPending, clearPending);
+    return pending;
   }
 
   private isSvg(name: string): boolean {
@@ -125,41 +155,85 @@ export class ZipSource implements IconSource {
     return name.startsWith(fragment) || name.includes(`/${fragment}`);
   }
 
-  public async listEntries(): Promise<RawEntry[]> {
-    const names = await this.listNames();
-    const svgs = names.filter((name) => this.isSvg(name));
+  public listEntries(): Promise<RawEntry[]> {
+    if (this.listing) return this.listing;
+    const pending = this.collectEntries();
+    this.listing = pending;
+    const clear = () => {
+      if (this.listing === pending) this.listing = null;
+    };
+    void pending.then(clear, clear);
+    return pending;
+  }
 
-    if (this.extraPath === '') {
-      return svgs.map((path) => ({ path }));
+  private async collectEntries(): Promise<RawEntry[]> {
+    const generation = this.generation;
+    const directory = await this.open(true);
+    const names = await directory.listNames();
+    // 名称数组先转交调用者，再入 LRU，缓存永远不持有列举用的百万字符串。
+    // Transfer temporary names before caching: the LRU must never retain the listing array.
+    if (generation === this.generation) keepArchive(this, directory);
+    // 完整分发包同时提供独立 SVG 与 symbol 集合；后者不是可独立显示的图标。
+    // A distribution may ship individual SVGs alongside non-rendering symbol sheets.
+    // 只有找到对应 svgs[/类别] 才排除 sprites/类别.svg，保留任意自定义 sprite 文件。
+    // Require the matching individual-icon directory; do not exclude arbitrary sprite files.
+    const individualDirectories = new Set<string>();
+    let scanDeadline = performance.now() + 4;
+    for (const name of names) {
+      const match = name.match(/^(.*\/)?svgs(-full)?\/([^/]+)\/[^/]+\.svg$/i);
+      if (match)
+        individualDirectories.add(
+          `${match[1] ?? ''}sprites${match[2] ?? ''}/${match[3]}.svg`.toLowerCase(),
+        );
+      if (performance.now() >= scanDeadline) {
+        await yieldToMain('background');
+        if (this.closed) {
+          const error = new Error('ZIP indexing cancelled');
+          error.name = 'AbortError';
+          throw error;
+        }
+        scanDeadline = performance.now() + 4;
+      }
     }
-
-    const exact = svgs.filter((name) =>
-      this.underFragment(name, this.extraPath),
-    );
-    if (exact.length > 0) {
-      return exact.map((path) => ({ path }));
-    }
-
-    // 精确路径没有匹配，多半是安装的归档版本与固定路径不同。
-    // 逐级放宽：先去掉带版本号的首段，再退到路径末段。
-    const relaxedCandidates = [
+    const candidates = [
+      this.extraPath,
       this.relaxedExtraPath(),
       this.extraPath.substring(this.extraPath.lastIndexOf('/') + 1),
     ].filter((candidate) => candidate !== '');
-
-    for (const candidate of relaxedCandidates) {
-      const matched = svgs.filter((name) =>
-        this.underFragment(name, candidate),
-      );
-      if (matched.length > 0) {
-        logger.info(
-          `Matched icon pack entries in '${this.zipPath}' on relaxed path '${candidate}' because '${this.extraPath}' matched nothing`,
+    let best = candidates.length;
+    const entries: RawEntry[] = [];
+    let deadline = performance.now() + 4;
+    for (const name of names) {
+      if (this.closed) {
+        const error = new Error('ZIP indexing cancelled');
+        error.name = 'AbortError';
+        throw error;
+      }
+      const isDistributionSheet =
+        /(^|\/)sprites(-full)?\/[^/]+\.svg$/i.test(name) &&
+        individualDirectories.has(name.toLowerCase());
+      const svg = this.isSvg(name) && !isDistributionSheet;
+      if (svg && !this.extraPath) entries.push({ path: name });
+      else if (svg) {
+        const rank = candidates.findIndex((candidate) =>
+          this.underFragment(name, candidate),
         );
-        return matched.map((path) => ({ path }));
+        if (rank !== -1 && rank <= best) {
+          if (rank < best) entries.length = 0;
+          best = rank;
+          entries.push({ path: name });
+        }
+      }
+      if (performance.now() >= deadline) {
+        await yieldToMain('background');
+        deadline = performance.now() + 4;
       }
     }
-
-    return [];
+    if (best > 0 && best < candidates.length)
+      logger.info(
+        `Matched '${this.zipPath}' on relaxed path '${candidates[best]}'`,
+      );
+    return entries;
   }
 
   /**
@@ -171,10 +245,14 @@ export class ZipSource implements IconSource {
    */
   public async readEntry(path: string): Promise<string | null> {
     try {
-      return (await this.open()).read(path);
+      return await (await this.open()).read(path);
     } catch (error) {
+      if (this.closed) return null;
+      if (error instanceof ZipSourceChangedError) this.dispose();
       logger.error(
-        `Could not read '${path}' from '${this.zipPath}' (${error})`,
+        `Could not read '${path}' from '${this.zipPath}'`,
+        undefined,
+        error,
       );
       return null;
     }
@@ -191,7 +269,18 @@ export class ZipSource implements IconSource {
   }
 
   public dispose(): void {
+    this.generation++;
+    archiveCache.delete(this);
+    if (!archiveCache.residentBytes && archiveIdleTimer !== null) {
+      window.clearTimeout(archiveIdleTimer);
+      archiveIdleTimer = null;
+    }
     this.archive = null;
+    this.listing = null;
+  }
+  public cancel(): void {
+    this.closed = true;
+    this.dispose();
   }
 }
 
@@ -204,6 +293,8 @@ export class ZipSource implements IconSource {
  */
 export class FolderSource implements IconSource {
   public readonly type = 'folder' as const;
+  private snapshot: Promise<RawEntry[]> | null = null;
+  private closed = false;
 
   constructor(
     private readonly adapter: DataAdapter,
@@ -211,10 +302,11 @@ export class FolderSource implements IconSource {
   ) {}
 
   private async walk(dir: string, collected: RawEntry[]): Promise<void> {
-    if (!(await this.adapter.exists(dir))) {
-      return;
+    if (this.closed) {
+      const error = new Error('Folder indexing cancelled');
+      error.name = 'AbortError';
+      throw error;
     }
-
     let listing: { files: string[]; folders: string[] };
     try {
       listing = await this.adapter.list(dir);
@@ -223,9 +315,19 @@ export class FolderSource implements IconSource {
       return;
     }
 
+    let deadline = performance.now() + 4;
     for (const file of listing.files) {
+      if (this.closed) {
+        const error = new Error('Folder indexing cancelled');
+        error.name = 'AbortError';
+        throw error;
+      }
       if (file.toLowerCase().endsWith('.svg')) {
         collected.push({ path: file });
+      }
+      if (performance.now() >= deadline) {
+        await yieldToMain('background');
+        deadline = performance.now() + 4;
       }
     }
 
@@ -234,18 +336,28 @@ export class FolderSource implements IconSource {
     }
   }
 
-  public async listEntries(): Promise<RawEntry[]> {
-    const collected: RawEntry[] = [];
-    await this.walk(this.root, collected);
-    return collected;
+  public listEntries(): Promise<RawEntry[]> {
+    if (!this.snapshot) {
+      const pending = (async () => {
+        const collected: RawEntry[] = [];
+        await this.walk(this.root, collected);
+        return collected;
+      })();
+      this.snapshot = pending;
+      void pending.catch(() => {
+        if (this.snapshot === pending) this.snapshot = null;
+      });
+    }
+    return this.snapshot;
   }
 
   public async readEntry(path: string): Promise<string | null> {
-    if (!(await this.adapter.exists(path))) {
+    try {
+      return await this.adapter.read(path);
+    } catch (error) {
+      logger.warn(`Could not read folder icon '${path}' (${error})`);
       return null;
     }
-
-    return this.adapter.read(path);
   }
 
   public async fingerprint(): Promise<SourceFingerprint> {
@@ -263,7 +375,12 @@ export class FolderSource implements IconSource {
   }
 
   public dispose(): void {
-    // 不持有任何句柄，每次读取都直接走文件系统。
+    // 快照只服务一次索引轮次，包变更/索引完成后释放。 / Release the indexing snapshot on completion or pack changes.
+    this.snapshot = null;
+  }
+  public cancel(): void {
+    this.closed = true;
+    this.dispose();
   }
 }
 

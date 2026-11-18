@@ -51,3 +51,5 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 ## Enhanced icon workflows
 
 Version 2.14.8 adds a color-aware icon picker, portable document embedding, delayed automatic conversion, configuration recovery, and cooperative search for large icon libraries. The default embed format is a self-contained Base64 SVG image. See [usage and validation notes](docs/development/2026-11-18-icon-workflows.md). Requires Obsidian 1.7.2 or later.
+
+Version 2.14.9 adds compact shared indexes, bounded SVG/ZIP caches, paged index persistence and desktop ZIP range reads. See [million-icon performance results and limits](docs/development/2026-11-18-million-icon-performance.md). It also fixes Fabp sprite imports and adds a unified Obsidian icon-pack management view. Measurements cover synthetic Node indexes and isolated Linux Obsidian ZIP64 archives; Windows Chromium and low-end device validation are still pending. See [validation and release notes](docs/development/2026-11-18-validation.md).

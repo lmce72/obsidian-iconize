@@ -5,6 +5,15 @@ import svg from './svg';
 import style from './style';
 import twemoji from '@twemoji/api';
 
+vi.mock('obsidian', () => ({
+  sanitizeHTMLToDom: (markup: string) => {
+    const fragment = document.createDocumentFragment();
+    const parsed = new DOMParser().parseFromString(markup, 'text/html');
+    fragment.append(...Array.from(parsed.body.childNodes));
+    return fragment;
+  },
+}));
+
 describe('removeIconInNode', () => {
   it('should remove the icon node from the provided element', () => {
     const el = document.createElement('div');
@@ -89,6 +98,9 @@ describe('setIconForNode', () => {
   let plugin: any;
   beforeEach(() => {
     vi.restoreAllMocks();
+    HTMLElement.prototype.setCssStyles = function (styles) {
+      Object.assign(this.style, styles);
+    };
     plugin = {
       getSettings: () => ({
         emojiStyle: 'native',
@@ -165,6 +177,51 @@ describe('setIconForNode', () => {
 
     dom.setIconForNode(plugin, 'IbTest', node);
     expect(applyAll).toBeCalledTimes(2);
+  });
+
+  it('keeps the latest color when requests for the same icon finish out of order', async () => {
+    getSvgFromLoadedIcon.mockReset().mockReturnValue(undefined);
+    const completions: Array<(value: { svgElement: string }) => void> = [];
+    plugin.iconResolver = {
+      find: () => true,
+      resolve: () => new Promise((resolve) => completions.push(resolve)),
+    };
+    const node = document.createElement('div');
+    document.body.append(node);
+    dom.setIconForNode(plugin, 'IbTest', node, {
+      color: 'red',
+      shouldApplyAllStyles: false,
+    });
+    dom.setIconForNode(plugin, 'IbTest', node, {
+      color: 'blue',
+      shouldApplyAllStyles: false,
+    });
+    completions[1]({ svgElement: '<svg></svg>' });
+    await Promise.resolve();
+    completions[0]({ svgElement: '<svg></svg>' });
+    await Promise.resolve();
+    expect(node.style.color).toBe('blue');
+    node.remove();
+  });
+
+  it('clears the previous icon color when the next request has none', () => {
+    getSvgFromLoadedIcon.mockReset().mockReturnValue('<svg></svg>');
+    const node = document.createElement('div');
+    dom.setIconForNode(plugin, 'IbTest', node, {
+      color: 'red',
+      shouldApplyAllStyles: false,
+    });
+    dom.setIconForNode(plugin, 'IbTest', node, { shouldApplyAllStyles: false });
+    expect(node.style.color).toBe('');
+  });
+
+  it('restores the global color after removing a per-icon override', () => {
+    getSvgFromLoadedIcon.mockReset().mockReturnValue('<svg></svg>');
+    plugin.getSettings = () => ({ iconColor: 'green', extraMargin: {} });
+    const node = document.createElement('div');
+    dom.setIconForNode(plugin, 'IbTest', node, { color: 'red' });
+    dom.setIconForNode(plugin, 'IbTest', node);
+    expect(node.style.color).toBe('green');
   });
 });
 

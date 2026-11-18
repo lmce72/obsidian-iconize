@@ -10,25 +10,31 @@ import { saveIconToIconPack } from '@app/util';
 export default class IconsPickerModal extends SuggestModal<Icon> {
   private request = 0;
   private closed = false;
+  private closedQuery = '';
   public selectedColor?: string;
   public onSelect?: (iconName: string) => void;
+  public onColor?: (color: string | undefined, query: string) => void;
+  public onDraftSelect?: (iconName: string, query: string) => void;
+  public initialQuery = '';
 
   constructor(
     app: App,
     private plugin: IconizePlugin,
     private path: string,
     initialColor?: string,
+    preserveUndefinedColor = false,
   ) {
     super(app);
     this.limit = 100;
     plugin.trackModal(this);
     this.setPlaceholder('搜索图标名称或图标包 / Search icon or pack');
     this.resultContainerEl.classList.add('iconize-modal');
-    this.selectedColor =
-      initialColor ??
-      plugin.getIconColor(path) ??
-      plugin.getSettings().iconColor ??
-      undefined;
+    this.selectedColor = preserveUndefinedColor
+      ? initialColor
+      : (initialColor ??
+        plugin.getIconColor(path) ??
+        plugin.getSettings().iconColor ??
+        undefined);
     const toolbar = this.inputEl.parentElement;
     if (toolbar) {
       toolbar.addClass('iconize-picker-search');
@@ -64,32 +70,46 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
       const colorInput = colorContainer.querySelector('input');
       colorInput?.setAttribute('aria-label', '设置图标颜色 / Set icon color');
       colorInput?.setAttribute('title', '设置图标颜色 / Set icon color');
+      colorInput?.addEventListener('click', (event) => {
+        if (!this.onColor) return;
+        event.preventDefault();
+        const query = this.inputEl.value;
+        const color = this.selectedColor;
+        this.close();
+        this.onColor(color, query);
+      });
     }
     this.updatePreviewColor();
   }
 
   private updatePreviewColor(): void {
+    // undefined 表示继承默认值，不能把展示用的全局颜色保存成路径覆盖。
+    // Undefined inherits the default; never persist its display color as a path override.
+    const color = this.selectedColor ?? this.plugin.getSettings().iconColor;
     this.inputEl.parentElement?.setCssProps({
-      '--iconize-picker-color': this.selectedColor ?? '#808080',
+      '--iconize-picker-color': color ?? '#808080',
     });
     this.resultContainerEl.setCssProps({
-      '--iconize-preview-color': this.selectedColor ?? 'var(--text-muted)',
+      '--iconize-preview-color': color ?? 'var(--text-muted)',
     });
-    this.resultContainerEl.toggleClass(
-      'iconize-preview-colored',
-      !!this.selectedColor,
-    );
+    this.resultContainerEl.toggleClass('iconize-preview-colored', !!color);
   }
 
   onOpen(): void {
     this.closed = false;
     super.onOpen();
+    if (this.initialQuery) {
+      this.inputEl.value = this.initialQuery;
+      this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   }
 
   onClose(): void {
+    this.closedQuery = this.inputEl.value;
     this.closed = true;
     this.request++;
-    this.plugin.releaseIconSources();
+    // ZIP 目录受全局预算与闲时释放控制，关闭后短暂保留以避免重新打开重复扫描。
+    // Global byte/idle limits retain a short grace period instead of rescanning on every reopen.
     this.plugin.releaseModal(this);
     super.onClose();
   }
@@ -152,6 +172,12 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
   }
 
   onChooseSuggestion(item: Icon): void {
+    if (this.onDraftSelect) {
+      const query = this.closed ? this.closedQuery : this.inputEl.value;
+      if (!this.closed) this.close();
+      this.onDraftSelect(item.displayName, query);
+      return;
+    }
     this.onChooseItem(item);
   }
 

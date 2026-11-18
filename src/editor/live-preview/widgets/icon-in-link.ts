@@ -7,7 +7,8 @@ import {
 } from '@app/lib/util/text';
 import svg from '@app/lib/util/svg';
 import IconizePlugin from '@app/main';
-import { WidgetType } from '@codemirror/view';
+import { EditorView, WidgetType } from '@codemirror/view';
+import { sanitizeHTMLToDom } from 'obsidian';
 
 export class IconInLinkWidget extends WidgetType {
   constructor(
@@ -19,21 +20,18 @@ export class IconInLinkWidget extends WidgetType {
     super();
   }
 
-  toDOM() {
-    const iconNode = document.createElement('span');
+  toDOM(view: EditorView) {
+    const iconNode = view.dom.ownerDocument.createElement('span');
     const iconName =
       typeof this.iconData === 'string'
         ? this.iconData
         : this.iconData.prefix + this.iconData.name;
-    iconNode.style.color =
+    const color =
       this.plugin.getIconColor(this.path) ??
       this.plugin.getSettings().iconColor;
+    if (color) iconNode.setCssStyles({ color });
     iconNode.setAttribute('title', iconName);
     iconNode.classList.add('iconize-icon-in-link');
-
-    if (typeof this.iconData === 'string') {
-      iconNode.style.transform = 'translateY(0)';
-    }
 
     let innerHTML =
       typeof this.iconData === 'string'
@@ -45,7 +43,15 @@ export class IconInLinkWidget extends WidgetType {
       fontSize = calculateHeaderSize(this.headerType);
     }
 
+    if (typeof this.iconData === 'string' && !emoji.isEmoji(this.iconData)) {
+      this.plugin.inlineIconLoader?.fillElement(iconNode, this.iconData, {
+        fontSize,
+      });
+      return iconNode;
+    }
+
     if (emoji.isEmoji(innerHTML)) {
+      iconNode.setCssStyles({ transform: 'translateY(0)' });
       innerHTML = emoji.parseEmoji(
         this.plugin.getSettings().emojiStyle,
         innerHTML,
@@ -55,8 +61,13 @@ export class IconInLinkWidget extends WidgetType {
       innerHTML = svg.setFontSize(innerHTML, fontSize);
     }
 
-    iconNode.innerHTML = innerHTML;
+    iconNode.replaceChildren(sanitizeHTMLToDom(innerHTML));
     return iconNode;
+  }
+
+  destroy(dom: HTMLElement): void {
+    if (typeof this.iconData === 'string' && !emoji.isEmoji(this.iconData))
+      this.plugin.inlineIconLoader?.releaseElement(dom, this.iconData);
   }
 
   ignoreEvent(): boolean {

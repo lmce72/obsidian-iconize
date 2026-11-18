@@ -13,6 +13,8 @@ import {
 } from '@app/lib/icon-sources';
 import type { IconSource } from '@app/lib/icon-sources';
 import { indexAndRegisterPack } from '@app/lib/lazy-loading-integration';
+import { throwIfAborted, yieldToMain } from '@app/lib/task-scheduler';
+import { buildIndex } from '@app/lib/icon-indexing';
 
 export interface Icon {
   name: string;
@@ -30,6 +32,7 @@ export class IconPackManager {
   private iconPacks: IconPack[];
   private lucideIconPack: LucideIconPack;
   private fileManager: FileManager;
+  private readonly importing = new Set<string>();
 
   /**
    * 与已安装图标包同名的解压目录。
@@ -112,7 +115,10 @@ export class IconPackManager {
     // 归档即保持压缩的图标包。
     for (let i = 0; i < loadedIconPacks.files.length; i++) {
       const fileName = loadedIconPacks.files[i];
-      if (!fileName.endsWith('.zip')) {
+      if (
+        !fileName.endsWith('.zip') ||
+        fileName.split('/').pop().startsWith('.')
+      ) {
         continue;
       }
 
@@ -259,9 +265,19 @@ export class IconPackManager {
   // ===== END PATCH =====
 
   public async createCustomIconPackDirectory(dir: string): Promise<void> {
+    if (!dir || dir.startsWith('.') || /[\\/\0]/.test(dir))
+      throw new Error('Invalid icon pack name');
+    if (await this.doesIconPackExist(dir))
+      throw new Error('An icon pack with this name already exists');
     await this.fileManager.createDirectory(this.path, dir);
-    const iconPack = new IconPack(this.plugin, dir, true);
+    const iconPack = new IconPack(
+      this.plugin,
+      dir,
+      true,
+      new FolderSource(this.plugin.app.vault.adapter, `${this.path}/${dir}`),
+    );
     this.iconPacks.push(iconPack);
+    await indexAndRegisterPack(this.plugin, iconPack);
   }
 
   // ===== PATCHED: 导入的图标包与启动时发现的包走同一条索引路径 =====
@@ -279,56 +295,132 @@ export class IconPackManager {
     name: string,
     arrayBuffer: ArrayBuffer,
   ): Promise<void> {
-    // 归档必须落盘：它既是读取源，也是重启后的发现依据。
+    if (!name || name.startsWith('.') || /[\\/\0]/.test(name))
+      throw new Error('Invalid icon pack name');
+    if (this.importing.has(name))
+      throw new Error('This icon pack is already being imported');
+    if (!this.plugin.lazyLoadingSystem || !this.plugin.iconResolver)
+      throw new Error('Icon loading is not ready; try importing again shortly');
+    this.importing.add(name);
+    try {
+      await this.importIconPack(name, arrayBuffer);
+    } finally {
+      this.importing.delete(name);
+    }
+  }
+
+  private async importIconPack(
+    name: string,
+    arrayBuffer: ArrayBuffer,
+  ): Promise<void> {
+    const adapter = this.plugin.app.vault.adapter;
+    const system = this.plugin.lazyLoadingSystem;
+    const signal = system?.signal;
     const zipPath = `${this.path}/${name}.zip`;
-    if (!(await this.plugin.app.vault.adapter.exists(zipPath))) {
-      await this.getFileManager().createZipFile(
-        this.path,
-        `${name}.zip`,
-        arrayBuffer,
-      );
-    }
-
-    // 移除同名旧包，避免重复登记。
+    const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const stagedPath = `${this.path}/.iconize-import-${token}.zip`;
+    const backupPath = `${this.path}/.iconize-backup-${token}.zip`;
     const existing = this.getIconPackByName(name);
-    if (existing) {
-      this.iconPacks = this.iconPacks.filter((pack) => pack.getName() !== name);
-    }
-
+    // ZIP 可替换旧 ZIP，但不能遮蔽用户维护的同名目录包。
+    // ZIP replacements may update archives, never shadow a user's folder pack.
+    if (
+      existing?.isCustomPack() ||
+      existing?.getSource()?.type === 'folder' ||
+      (!(await adapter.exists(zipPath)) &&
+        (await adapter.exists(`${this.path}/${name}`)))
+    )
+      throw new Error('A custom folder pack with this name already exists');
+    const stagedSource = new ZipSource(
+      adapter,
+      stagedPath,
+      getExtraPath(name) ?? '',
+    );
     const iconPack = new IconPack(
       this.plugin,
       name,
       false,
-      new ZipSource(
-        this.plugin.app.vault.adapter,
-        zipPath,
-        getExtraPath(name) ?? '',
-      ),
+      new ZipSource(adapter, zipPath, getExtraPath(name) ?? ''),
       name === LUCIDE_ICON_PACK_NAME ? 'Li' : undefined,
     );
-    this.iconPacks.push(iconPack);
-
-    const count = await indexAndRegisterPack(this.plugin, iconPack);
-
-    if (count === 0) {
-      // 归档已落盘，但本次会话没能索引它（按需加载层未就绪，或归档里没有可索引的图标）。
-      // 不做内存回退：那条路径依赖已被移除的旧结构，且会让这个包只在本次会话可用、
-      // 行为与其它包不一致。明确报错让用户重载。
-      //
-      // The archive is on disk but was not indexed this session. No in-memory fallback: it
-      // depended on the removed structures and would make this pack behave differently
-      // from every other one. Report it and let the user reload.
-      logger.error(
-        `Icon pack ${name} was saved but could not be indexed; reload Obsidian to pick it up`,
+    let backedUp = false;
+    let installed = false;
+    let committed = false;
+    try {
+      throwIfAborted(signal);
+      // 先在同目录暂存并建立索引；损坏或空包不能覆盖已有可用归档。
+      // Stage and index first; a corrupt or empty archive must never replace a usable pack.
+      await adapter.writeBinary(stagedPath, arrayBuffer);
+      throwIfAborted(signal);
+      const index = await buildIndex(
+        name,
+        iconPack.getPrefix(),
+        stagedSource,
+        signal,
       );
-      new Notice(
-        `[${config.PLUGIN_NAME}] ${name} was saved but could not be indexed. Reload Obsidian to use it.`,
-        10000,
-      );
-      return;
+      throwIfAborted(signal);
+      if (!index.entries.length)
+        throw new Error('The archive contains no usable SVG icon entries');
+      stagedSource.dispose();
+      if (await adapter.exists(zipPath)) {
+        throwIfAborted(signal);
+        await adapter.rename(zipPath, backupPath);
+        backedUp = true;
+      }
+      throwIfAborted(signal);
+      await adapter.rename(stagedPath, zipPath);
+      installed = true;
+      throwIfAborted(signal);
+      const count = await indexAndRegisterPack(this.plugin, iconPack, index);
+      throwIfAborted(signal);
+      if (!count)
+        throw new Error('The imported icon pack could not be registered');
+      this.iconPacks = this.iconPacks.filter((pack) => pack.getName() !== name);
+      this.iconPacks.push(iconPack);
+      existing?.getSource()?.cancel?.();
+      existing?.getSource()?.dispose();
+      committed = true;
+      logger.info(`Registered icon pack ${name} (amount of icons: ${count})`);
+    } catch (error) {
+      iconPack.getSource()?.cancel?.();
+      try {
+        if (installed) await adapter.remove(zipPath);
+        if (backedUp) {
+          await adapter.rename(backupPath, zipPath);
+          backedUp = false;
+        }
+        if (installed) await system?.store?.delete(name);
+        // 原包对象直到提交成功才替换；恢复文件后也恢复解析器登记。
+        // Keep the old pack object until commit and restore resolver registration after rollback.
+        if (installed && existing && !signal?.aborted)
+          await indexAndRegisterPack(this.plugin, existing);
+      } catch (rollbackError) {
+        // 恢复失败时保留备份，不让清理步骤删除仅剩的原归档。
+        // Keep the backup if recovery fails; cleanup must not delete the remaining original.
+        logger.error(
+          'Icon import rollback failed; any temporary backup was retained',
+          undefined,
+          rollbackError,
+        );
+        logger.error('Original icon import failure', undefined, error);
+      }
+      throw error;
+    } finally {
+      stagedSource.dispose();
+      for (const path of [
+        stagedPath,
+        ...(committed && backedUp ? [backupPath] : []),
+      ]) {
+        try {
+          if (await adapter.exists(path)) await adapter.remove(path);
+        } catch (error) {
+          logger.error(
+            'Could not clean up an icon import temporary file',
+            undefined,
+            error,
+          );
+        }
+      }
     }
-
-    logger.info(`Registered icon pack ${name} (amount of icons: ${count})`);
   }
   // ===== END PATCH =====
 
@@ -428,8 +520,6 @@ export class IconPackManager {
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const results: Icon[] = [];
     const seen = new Set<string>();
-    let sliceStart = performance.now();
-    let count = 0;
     if (limit <= 0) return results;
     if (words.length === 1) {
       for (const pack of this.iconPacks) {
@@ -444,21 +534,52 @@ export class IconPackManager {
       }
     }
     for (const pack of this.iconPacks) {
-      const entries = pack.getEntries();
-      const items = entries.length ? entries : pack.getIcons();
-      for (const item of items) {
+      const entries = pack.getCompactIndex();
+      if (entries.length) {
+        await entries.forEachMatch(
+          words,
+          pack.getName(),
+          (entry) => {
+            const id = pack.getPrefix() + entry.name;
+            if (!seen.has(id)) {
+              seen.add(id);
+              results.push({
+                name: entry.name,
+                prefix: pack.getPrefix(),
+                displayName: id,
+                iconPackName: pack.getName(),
+                filename: entry.name,
+                svgContent: '',
+                svgViewbox: '',
+                svgElement: '',
+              });
+            }
+            return results.length < limit;
+          },
+          cancelled,
+        );
+        if (cancelled()) return [];
+        if (results.length >= limit) return results;
+        continue;
+      }
+      let sliceStart = performance.now();
+      let count = 0;
+      for (const item of pack.getIcons()) {
         if (cancelled()) return [];
         const id = pack.getPrefix() + item.name;
         const haystack =
           `${id} ${item.displayName} ${pack.getName()}`.toLowerCase();
         if (!seen.has(id) && words.every((word) => haystack.includes(word))) {
           const icon = pack.getIcon(item.name);
-          if (icon) results.push({ ...icon, displayName: id });
+          if (icon) {
+            seen.add(id);
+            results.push({ ...icon, displayName: id });
+          }
           if (results.length >= limit) return results;
         }
-        // 每 256 项检查时间，单片目标 8ms。 / Check every 256 entries; target 8ms slices.
-        if (++count % 256 === 0 && performance.now() - sliceStart >= 8) {
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        // 原生小包同样让出主线程。 / Native packs also yield cooperatively.
+        if (++count % 128 === 0 && performance.now() - sliceStart >= 4) {
+          await yieldToMain('user-visible');
           sliceStart = performance.now();
         }
       }
@@ -466,8 +587,17 @@ export class IconPackManager {
     return cancelled() ? [] : results;
   }
 
-  public doesIconPackExist(iconPackName: string): Promise<boolean> {
-    return this.plugin.app.vault.adapter.exists(`${this.path}/${iconPackName}`);
+  public async doesIconPackExist(iconPackName: string): Promise<boolean> {
+    if (
+      this.getIconPackByName(iconPackName) ||
+      this.importing.has(iconPackName)
+    )
+      return true;
+    const adapter = this.plugin.app.vault.adapter;
+    return (
+      (await adapter.exists(`${this.path}/${iconPackName}`)) ||
+      (await adapter.exists(`${this.path}/${iconPackName}.zip`))
+    );
   }
 
   public get allLoadedIconNames(): Icon[] {

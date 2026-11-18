@@ -1,6 +1,7 @@
-import { App, PluginSettingTab } from 'obsidian';
+import { App, Notice, PluginSettingTab } from 'obsidian';
+import { logger } from '@app/lib/logger';
 import IconizePlugin from '@app/main';
-import CustomIconPackSetting from './customIconPack';
+import { openIconManagementView } from '@app/views/icon-management-view';
 import CustomIconRuleSetting from './customIconRule';
 import EmojiStyleSetting from './emojiStyle';
 import ExtraMarginSetting from './extraMargin';
@@ -12,7 +13,6 @@ import ConfigFilePathSetting from './configFilePath';
 import InheritFolderNoteIconSetting from './inheritFolderNoteIcon';
 // ===== END PATCH =====
 import IconPacksBackgroundChecker from './iconPacksBackgroundChecker';
-import PredefinedIconPacksSetting from './predefinedIconPacks';
 import RecentlyUsedIconsSetting from './recentlyUsedIcons';
 import ToggleIconInTabs from './toggleIconInTabs';
 import ToggleIconInTitle from './toggleIconInTitle';
@@ -63,6 +63,19 @@ export default class IconFolderSettings extends PluginSettingTab {
     new EmojiStyleSetting(plugin, containerEl).display();
     new IconIdentifierSetting(plugin, containerEl).display();
     new UseInternalPlugins(plugin, containerEl).display();
+    new Setting(containerEl)
+      .setName('兼容 Notebook Navigator')
+      .setDesc(
+        '在文件和文件夹右键菜单中设置 Iconize 图标，并在 Navigator 内显示其图标与颜色。更改仅作用于右键点击的项目。',
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(plugin.getSettings().notebookNavigatorEnabled)
+          .onChange((enabled) => {
+            plugin.getSettings().notebookNavigatorEnabled = enabled;
+            void plugin.saveIconFolderData();
+          }),
+      );
     new DebugMode(plugin, containerEl).display();
 
     containerEl.createEl('h3', { text: 'Visibility of icons' });
@@ -86,13 +99,22 @@ export default class IconFolderSettings extends PluginSettingTab {
       this.display(),
     ).display();
 
-    containerEl.createEl('h1', { text: 'Icon packs' });
-    new PredefinedIconPacksSetting(plugin, containerEl, app, () =>
-      this.display(),
-    ).display();
-    new CustomIconPackSetting(plugin, containerEl, () =>
-      this.display(),
-    ).display();
+    containerEl.createEl('h1', { text: '图标包' });
+    new Setting(containerEl)
+      .setName('管理图标包')
+      .setDesc('浏览、导入和管理已安装的图标包。')
+      .addButton((button) =>
+        button.setButtonText('打开管理视图').onClick(() => {
+          void openIconManagementView(plugin).catch((error: unknown) => {
+            logger.error(
+              'Could not open icon pack management',
+              undefined,
+              error,
+            );
+            new Notice('无法打开图标包管理视图。');
+          });
+        }),
+      );
     for (const { element, top } of positions) element.scrollTop = top;
   }
 }

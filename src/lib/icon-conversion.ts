@@ -80,7 +80,7 @@ export class IconConversion {
         for (const byte of bytes) binary += String.fromCharCode(byte);
         values.set(
           id,
-          `![${id}](data:image/svg+xml;base64,${window.btoa(binary)})`,
+          `<img alt="${id}" src="data:image/svg+xml;base64,${window.btoa(binary)}" width="16" height="16">`,
         );
       } else {
         // 文件名来自规范 id；已有资源相同则复用，内容变化时另存，绝不覆盖用户文件。
