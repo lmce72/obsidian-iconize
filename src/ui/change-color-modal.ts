@@ -71,7 +71,11 @@ export default class ChangeColorModal extends Modal {
     const previewRow = this.contentEl.createDiv({
       cls: 'iconize-color-preview',
     });
-    const previewFrame = previewRow.createEl('button', {
+    // 预览方块与提示文字纵向排列，提示宽度锁定为方块宽度。 / Stack the block and its hint; keep the hint as wide as the block.
+    const previewIcon = previewRow.createDiv({
+      cls: 'iconize-color-preview-icon',
+    });
+    const previewFrame = previewIcon.createEl('button', {
       cls: 'iconize-color-preview-frame iconize-preview-colored',
       attr: {
         type: 'button',
@@ -88,7 +92,16 @@ export default class ChangeColorModal extends Modal {
     });
     this.preview = previewFrame.createDiv({ cls: 'iconize-icon-preview' });
     setIcon(this.preview, 'palette');
-    const previewText = previewRow.createDiv();
+    // 按钮已有 aria-label，可见提示不重复播报。 / The button's aria-label already names the action, so the visible hint stays decorative.
+    previewIcon.createDiv({
+      cls: 'iconize-color-preview-hint',
+      text: '点击更改图标',
+      attr: { 'aria-hidden': 'true' },
+    });
+    // 文案与方块居中对齐，不受下方提示高度影响。 / Align the copy with the block, not with the taller column.
+    const previewText = previewRow.createDiv({
+      cls: 'iconize-color-preview-text',
+    });
     previewText.createEl('div', {
       text: '颜色预览',
       cls: 'iconize-color-label',

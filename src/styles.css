@@ -188,15 +188,38 @@
 }
 .iconize-color-preview {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   padding-block: 8px 16px;
   border-block-end: 1px solid var(--background-modifier-border);
 }
+.iconize-color-preview-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  block-size: 56px;
+}
+.iconize-color-preview-icon {
+  display: flex;
+  flex: 0 0 56px;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  inline-size: 56px;
+}
+.iconize-color-preview-hint {
+  /* 六个汉字单行放进 56px 方块宽度，只用 9px。 / Six CJK characters must stay on one line inside 56px. */
+  inline-size: 100%;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.4;
+  text-align: center;
+  white-space: nowrap;
+}
 .iconize-color-preview-frame {
   display: grid;
   place-items: center;
-  flex: 0 0 56px;
+  inline-size: 56px;
   block-size: 56px;
   border-radius: var(--radius-m);
   background: var(--background-secondary);

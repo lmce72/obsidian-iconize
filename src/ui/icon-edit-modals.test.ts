@@ -192,6 +192,21 @@ describe('color editor lifecycle', () => {
     expect(state.notices).toEqual([]);
   });
 
+  it('shows a hint under the preview block that names the click action', () => {
+    const modal = new ChangeColorModal({} as App, fixture(), 'a.md');
+    modal.open();
+    const previewIcon = modal.contentEl.querySelector(
+      '.iconize-color-preview-icon',
+    )!;
+    expect(previewIcon.querySelector('.iconize-color-preview-frame')).not.toBe(
+      null,
+    );
+    expect(
+      previewIcon.querySelector('.iconize-color-preview-hint')?.textContent,
+    ).toBe('点击更改图标');
+    modal.close();
+  });
+
   it('keeps the draft and unlocks controls when saving fails synchronously', async () => {
     const save = vi
       .fn()
