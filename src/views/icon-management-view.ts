@@ -27,12 +27,20 @@ function operationLocks(plugin: IconizePlugin): Set<string> {
 export async function openIconManagementView(
   plugin: IconizePlugin,
 ): Promise<void> {
+  // 从设置页进入时设置是一层覆盖窗口，不关掉它，新标签页只会被压在下面。
+  // Settings is a full-window overlay; without closing it the new tab opens behind it.
+  (plugin.app as unknown as { setting?: { close(): void } }).setting?.close();
   const workspace = plugin.app.workspace;
-  let leaf = workspace.getLeavesOfType(ICON_MANAGEMENT_VIEW_TYPE)[0];
-  if (!leaf) {
-    leaf = workspace.getLeaf('tab');
-    await leaf.setViewState({ type: ICON_MANAGEMENT_VIEW_TYPE, active: true });
+  const [existing] = workspace.getLeavesOfType(ICON_MANAGEMENT_VIEW_TYPE);
+  if (existing?.view instanceof IconManagementView) {
+    await workspace.revealLeaf(existing);
+    return;
   }
+  // 插件停用期间恢复的工作区会留下只有类型名的空视图，只 reveal 永远打不开。
+  // A workspace restored while the plugin was disabled keeps a stub view that still
+  // reports this type; revealing it never mounts the real view, so rebuild it.
+  const leaf = existing ?? workspace.getLeaf('tab');
+  await leaf.setViewState({ type: ICON_MANAGEMENT_VIEW_TYPE, active: true });
   await workspace.revealLeaf(leaf);
 }
 
