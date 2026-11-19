@@ -77,6 +77,41 @@ describe('inline icon loading', () => {
     expect(f.plugin.releaseIconSources).not.toHaveBeenCalled();
   });
 
+  it('fills a cold icon before its asynchronously rendered section is mounted', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const section = document.createElement('div');
+    const element = document.createElement('span');
+    section.append(element);
+    f.loader.fillElement(element, 'One');
+
+    // 后处理器可以在未挂载的章节中运行，慢渲染使挂载晚于解析完成。
+    // Post-processors may run in detached sections whose mounting follows resolution.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.resolve).toHaveBeenCalledTimes(1);
+    document.body.append(section);
+    expect(element.querySelector('svg')).not.toBeNull();
+    expect(f.current.previewMode.rerender).not.toHaveBeenCalled();
+    expect(f.current.editor.cm.dispatch).not.toHaveBeenCalled();
+    expect(f.loader.getStats()).toEqual({ pending: 0, failed: 0, inFlight: false });
+  });
+
+  it('does not fill a detached widget explicitly released during its source read', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const read = gate<{ svgElement: string }>();
+    f.resolve.mockReturnValueOnce(read.promise);
+    const element = document.createElement('span');
+    f.loader.fillElement(element, 'One');
+    await vi.advanceTimersByTimeAsync(24);
+    f.loader.releaseElement(element, 'One');
+    read.finish({ svgElement: MARKUP });
+    await settle();
+    document.body.append(element);
+    expect(element.querySelector('svg')).toBeNull();
+    expect(f.loader.getStats()).toEqual({ pending: 0, failed: 0, inFlight: false });
+  });
+
   it('refreshes only the editor that requested a legacy repaint', async () => {
     vi.useFakeTimers();
     const f = fixture();

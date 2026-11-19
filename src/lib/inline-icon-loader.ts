@@ -97,8 +97,11 @@ export class InlineIconLoader {
       // 保留登记直至处理该节点，使 yield 期间的释放仍能取消它。
       // Keep the registry live across yields so release can cancel unprocessed nodes.
       elements.delete(element);
-      if (element.isConnected)
-        this.renderInto(element, markup, options.fontSize);
+      // Markdown 后处理器与 widget 可在章节挂载前运行。未连接不等于已销毁；
+      // 显式 release/reset 才取消填充，与同步缓存命中的处理方式保持一致。
+      // Detached sections may still be mounting; only release/reset cancels their owned nodes,
+      // just as a synchronous cache hit can populate a node before it enters the document.
+      this.renderInto(element, markup, options.fontSize);
       if (performance.now() >= deadline) {
         await yieldToMain('user-visible');
         deadline = performance.now() + SLICE_MS;
