@@ -45,7 +45,7 @@
 ## 格式细节
 
 - **Iconify JSON**：支持 `width/height/left/top`、`aliases` 的 `parent`、`hFlip`、`vFlip`、`rotate`，别名链最多 8 层；无法解析父图标的名称计入跳过。
-- **Iconify 图标集归档**：识别 `json/*.json`（icon-sets 仓库）或多个 Iconify JSON 的归档。先列出集合让用户勾选，只读取选中的 JSON；选择多个集合时用各自 prefix 作为目录（`mdi/home.svg`、`tabler/home.svg`），只选一个时包名取该 prefix、图标平铺。非 SVG 条目使用 128 MB 读取上限，不再套用图标的 8 MB 限制；单个集合超过 64 MB 时选择器禁用并标注「过大」，转换时跳过并给出原因。全部选中可能包含数十万图标，选择器会提示。
+- **Iconify 图标集归档**：识别 `json/*.json`（icon-sets 仓库）或多个 Iconify JSON 的归档。先列出集合让用户勾选，只读取选中的 JSON；选择多个集合时用各自 prefix 作为目录（`mdi/home.svg`、`tabler/home.svg`），只选一个时包名取该 prefix、图标平铺。非 SVG 条目使用 128 MB 读取上限，不再套用图标的 8 MB 限制；单个集合超过 64 MB 时选择器禁用并标注「过大」，转换时跳过并给出原因。归一化归档超过 65,535 个图标时改用 ZIP64 写入（fflate 的 16 位条目计数会回绕），运行时读取器支持 ZIP64。全部选中可能包含数十万图标，选择器会提示。
 - **SVG Sprite**：拆出每个 `<symbol>`，保留 `id`、`viewBox` 和 symbol 上的表现属性。
 - **JS 图标模块**：只读源码文本，不执行；按「目录 + 名称」去重，因此 `16/solid`、`20/solid`、`24/solid`、`24/outline` 四套风格都会保留；ESM 与非 ESM 双构建按路径去重。
 - **字体**：opentype.js 2.0 解析 TTF/OTF/WOFF。优先使用 CSS 的类名 → 码位映射（`content:"\f007"` 与 Font Awesome 7 的 `--fa:"\f007"` 都支持），缺少 CSS 时退回字形名。WOFF2 会在输入前按魔数拒绝，并提示改用 TTF/OTF/WOFF 或 SVG 包。多个字体文件按 TTF → OTF → WOFF 顺序尝试，单个字体解析失败不会连累同包其它字体。
@@ -82,6 +82,8 @@
 归一化耗时（隔离 Linux 机器）：Tabler 仓库约 1.6–1.8 s，Iconify MDI 约 1.3–1.5 s，其余大多数在 0.2–1.2 s。最大的单包归档为 MDI 的 4.70 MiB（含 6363 个别名）。
 
 `~/下载/iconify.zip` 实测：icon-sets 仓库 145 MiB、285 个集合；选择器列出 285 个集合，只读取 `json/bytesize.json` 时得到 102 个图标，归一化 0.03 MiB、44 ms。选择 `material-symbols-light`（JSON 10.9 MiB）得到 24,167 个图标，归一化 10.92 MiB、约 2.3 s。`fluent-emoji` 等超过 64 MB 的集合在选择器中禁用并标注「过大」，转换时跳过。选择多个集合时用 prefix 分目录；全部选中会生成非常大的归档，建议按需勾选。
+
+超过 16 位条目数的实测：选择 `material-symbols-light`、`iconmind`、`fluent` 三个集合，归一化得到 **76,783 个图标 / 31.81 MiB**，约 11.3 s；ZIP64 归档能被 `ZipDirectory` 完整列出，索引建立 76,783 条、约 216 ms。此前同一操作会因为 `fflate` 的 16 位计数回绕而报 `Invalid ZIP directory entry count`。
 
 ## 对抗性审查后的修正
 

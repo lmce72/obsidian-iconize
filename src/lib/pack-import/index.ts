@@ -9,7 +9,8 @@
  * The runtime never sees any of these format differences.
  */
 
-import { strToU8, zipSync } from 'fflate';
+import { strToU8 } from 'fflate';
+import { writeZip } from './zip-writer';
 import {
   baseName,
   MAX_TEXT_ENTRY_BYTES,
@@ -460,7 +461,7 @@ export async function normalizeIconPack(
   return {
     format: converted.format,
     label: converted.label,
-    archive: zipSync(ordered, { level: 6 }),
+    archive: writeZip(ordered),
     iconCount,
     skipped,
     warnings: converted.warnings,

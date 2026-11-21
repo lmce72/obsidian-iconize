@@ -50,6 +50,8 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 
 ## Enhanced icon workflows
 
+Version 2.15.4 writes a valid ZIP64 archive when a normalized pack exceeds 65,535 icons. `fflate`'s ZIP writer stores the entry count in a 16-bit field, so selecting several large Iconify sets previously produced a corrupt central directory and the index reported `Invalid ZIP directory entry count`. A real three-set selection now imports 76,783 icons into a 31.81 MiB archive and indexes in about 216 ms.
+
 Version 2.15.3 separates non-SVG archive limits from the 8 MB per-icon limit. Iconify set JSONs larger than 8 MB now import normally (for example `material-symbols-light`: 24,167 icons), and sets above 64 MB are disabled in the picker and skipped with a clear reason instead of failing on the SVG limit.
 
 Version 2.15.2 recognizes archives of multiple Iconify sets, such as the `icon-sets` repository ZIP with its `json/*.json` layout. A picker lists the sets; only the checked JSON files are read and converted. Selecting several sets uses each Iconify prefix as a folder so equal names stay distinct; selecting one names the pack after that prefix. Importing all sets is supported but can produce a very large archive.
