@@ -102,6 +102,65 @@ describe('large icon search', () => {
     expect(await manager.searchIcons('circle right')).toEqual([]);
     expect(await manager.searchIcons('outline', 0)).toEqual([]);
   });
+  it('filters packs, fuzzy-matches and sorts by relevance', async () => {
+    const makePack = (name: string, prefix: string, icons: string[]) => {
+      const pack = new IconPack(
+        {} as IconizePlugin,
+        name,
+        false,
+        undefined,
+        prefix,
+      );
+      pack.setIndex(
+        icons.map((icon) => ({
+          id: `${prefix}${icon}`,
+          name: icon,
+          displayName: icon,
+          folder: '',
+          path: `${icon}.svg`,
+        })),
+      );
+      return pack;
+    };
+    const alpha = makePack('alpha', 'Al', ['Home', 'Star']);
+    const beta = makePack('beta', 'Be', [
+      'Home',
+      'Heart',
+      'BookHeart',
+      'Heartbeat',
+    ]);
+    const manager: IconPackManager = Object.assign(
+      Object.create(IconPackManager.prototype),
+      { iconPacks: [alpha, beta] },
+    );
+
+    expect(
+      (
+        await manager.searchIcons('home', 10, () => false, undefined, {
+          packs: new Set(['alpha']),
+        })
+      ).map((item) => item.prefix + item.name),
+    ).toEqual(['AlHome']);
+
+    expect(await manager.searchIcons('hrt', 10)).toEqual([]);
+    expect(
+      (
+        await manager.searchIcons('hrt', 10, () => false, undefined, {
+          fuzzy: true,
+        })
+      ).map((item) => item.name),
+    ).toContain('Heart');
+
+    expect(
+      (
+        await manager.searchIcons('heart', 10, () => false, undefined, {
+          packs: new Set(['beta']),
+          sortByRelevance: true,
+        })
+      ).map((item) => item.name),
+    ).toEqual(['Heart', 'Heartbeat', 'BookHeart']);
+  });
+
   it('returns the next unseen batch when an exclusion is provided', async () => {
     const pack = new IconPack(
       {} as IconizePlugin,

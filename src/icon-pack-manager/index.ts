@@ -34,6 +34,108 @@ export interface Icon {
   svgElement: string;
 }
 
+/** 图标搜索选项 / Icon search options. */
+export interface IconSearchOptions {
+  /** 只搜索这些图标包名；空集合表示全部。 / Only these pack names; empty means all. */
+  packs?: ReadonlySet<string>;
+  /** 子序列模糊匹配 / Subsequence (fuzzy) matching. */
+  fuzzy?: boolean;
+  /** 按相关性从高到低排序 / Sort by relevance, highest first. */
+  sortByRelevance?: boolean;
+}
+
+/** 相关性候选上限，避免宽查询为排序物化整个图标库。 */
+// Relevance candidate ceiling: a broad query must not materialize the whole library.
+const MAX_RELEVANCE_CANDIDATES = 10_000;
+
+/**
+ * 子序列匹配得分 / Subsequence match score.
+ *
+ * 返回 `null` 表示不匹配；连续字符加分、间隔扣分，用于模糊搜索。得分本身可以为负，
+ * 因此不能用负数作为“不匹配”哨兵。
+ * `null` means no match; consecutive characters gain, gaps lose. A valid score can be
+ * negative, so a negative number cannot double as the no-match sentinel.
+ */
+function fuzzyScore(haystack: string, needle: string): number | null {
+  if (!needle) return 0;
+  let index = -1;
+  let score = 0;
+  let streak = 0;
+  for (const char of needle) {
+    const next = haystack.indexOf(char, index + 1);
+    if (next === -1) return null;
+    streak = next === index + 1 ? streak + 1 : 0;
+    score += streak * 3 - (next - index - 1);
+    index = next;
+  }
+  return score;
+}
+
+function matchesWords(
+  haystack: string,
+  words: string[],
+  fuzzy: boolean,
+): boolean {
+  if (!fuzzy) return words.every((word) => haystack.includes(word));
+  return words.every((word) => fuzzyScore(haystack, word) !== null);
+}
+
+/**
+ * 图标相关性 / Icon relevance.
+ *
+ * 精确名称最高，其次是名称前缀和包含，最后是模糊匹配；位置越靠前、名称越短得分越高。
+ * Exact names rank highest, then prefixes and substrings, then fuzzy matches; earlier
+ * positions and shorter names score higher.
+ */
+function relevanceScore(
+  icon: Icon,
+  query: string,
+  words: string[],
+  fuzzy: boolean,
+): number {
+  const needle = query.toLowerCase().trim();
+  const name = icon.name.toLowerCase();
+  const display = icon.displayName.toLowerCase();
+  const id = `${icon.prefix}${icon.name}`.toLowerCase();
+  let score = 0;
+  if (needle && (name === needle || display === needle || id === needle))
+    score += 1000;
+  else if (
+    needle &&
+    (name.startsWith(needle) ||
+      display.startsWith(needle) ||
+      id.startsWith(needle))
+  )
+    score += 600;
+  else if (
+    needle &&
+    (name.includes(needle) || display.includes(needle) || id.includes(needle))
+  )
+    score += 300;
+  else if (fuzzy) {
+    const fuzzyValues = [name, display, id]
+      .map((value) => fuzzyScore(value, needle))
+      .filter((value): value is number => value !== null);
+    if (!fuzzyValues.length) return -1;
+    score += 100 + Math.max(...fuzzyValues);
+  } else {
+    // 多词查询不要求整串连续出现；调用方已验证每个词都命中。
+    // Multi-word queries need not contain the joined string; the caller verified each word.
+    score += 50;
+  }
+
+  const position = name.indexOf(needle);
+  if (position > 0) score -= Math.min(position, 40) * 2;
+  score -= Math.min(name.length, 80);
+  for (const word of words) {
+    if (name === word) score += 220;
+    else if (name.startsWith(word)) score += 120;
+    else if (name.includes(word)) score += 40;
+    else if (display.includes(word)) score += 15;
+  }
+  return score;
+}
+
 export class IconPackManager {
   private path: string;
   private iconPacks: IconPack[];
@@ -564,35 +666,64 @@ export class IconPackManager {
     cancelled: () => boolean = () => false,
     /** 跳过调用方已展示过的图标，用于「换一批」。 / Skip ids already shown by the caller. */
     exclude?: (id: string) => boolean,
+    options: IconSearchOptions = {},
   ): Promise<Icon[]> {
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const results: Icon[] = [];
     const seen = new Set<string>();
     if (limit <= 0) return results;
+    const allowedPacks = this.iconPacks.filter(
+      (pack) =>
+        !options.packs ||
+        options.packs.size === 0 ||
+        options.packs.has(pack.getName()),
+    );
+    const fuzzy = options.fuzzy === true;
+    // 空查询保持最近使用/索引顺序；只有真实查询才按相关性排序。
+    // An empty query keeps recent/index order; only real queries are relevance-sorted.
+    const collect = options.sortByRelevance === true && words.length > 0;
+    const scored: { icon: Icon; score: number }[] = [];
+
+    const push = (icon: Icon): void => {
+      const id = icon.prefix + icon.name;
+      if (seen.has(id) || exclude?.(id)) return;
+      seen.add(id);
+      if (!collect) {
+        results.push(icon);
+        return;
+      }
+      if (scored.length >= MAX_RELEVANCE_CANDIDATES) return;
+      const score = relevanceScore(icon, query, words, fuzzy);
+      scored.push({ icon, score: score < 0 ? 0 : score });
+    };
+    const full = (): boolean =>
+      collect
+        ? scored.length >= MAX_RELEVANCE_CANDIDATES
+        : results.length >= limit;
+
     if (words.length === 1) {
-      for (const pack of this.iconPacks) {
+      for (const pack of allowedPacks) {
         if (cancelled()) return [];
         const exact = pack.findExactIcon(words[0]);
-        if (exact) {
-          const id = exact.prefix + exact.name;
-          if (exclude?.(id)) continue;
-          results.push({ ...exact, displayName: id });
-          seen.add(id);
-          if (results.length >= limit) return results;
-        }
+        if (exact) push({ ...exact, displayName: exact.prefix + exact.name });
+        if (!collect && results.length >= limit) return results;
       }
     }
-    for (const pack of this.iconPacks) {
+
+    for (const pack of allowedPacks) {
       const entries = pack.getCompactIndex();
       if (entries.length) {
-        await entries.forEachMatch(
-          words,
-          pack.getName(),
-          (entry) => {
+        if (fuzzy) {
+          // 模糊匹配无法使用索引内的子串快速路径，逐条扫描并合作式让出。
+          // Fuzzy matching cannot use the index substring fast path; scan cooperatively.
+          let sliceStart = performance.now();
+          let count = 0;
+          for (const entry of entries) {
+            if (cancelled()) return [];
             const id = pack.getPrefix() + entry.name;
-            if (!seen.has(id) && !exclude?.(id)) {
-              seen.add(id);
-              results.push({
+            const haystack = `${id} ${entry.displayName}`.toLowerCase();
+            if (matchesWords(haystack, words, true)) {
+              push({
                 name: entry.name,
                 prefix: pack.getPrefix(),
                 displayName: id,
@@ -602,13 +733,36 @@ export class IconPackManager {
                 svgViewbox: '',
                 svgElement: '',
               });
+              if (full()) break;
             }
-            return results.length < limit;
-          },
-          cancelled,
-        );
+            if (++count % 128 === 0 && performance.now() - sliceStart >= 4) {
+              await yieldToMain('user-visible');
+              sliceStart = performance.now();
+            }
+          }
+        } else {
+          await entries.forEachMatch(
+            words,
+            pack.getName(),
+            (entry) => {
+              const id = pack.getPrefix() + entry.name;
+              push({
+                name: entry.name,
+                prefix: pack.getPrefix(),
+                displayName: id,
+                iconPackName: pack.getName(),
+                filename: entry.name,
+                svgContent: '',
+                svgViewbox: '',
+                svgElement: '',
+              });
+              return !full();
+            },
+            cancelled,
+          );
+        }
         if (cancelled()) return [];
-        if (results.length >= limit) return results;
+        if (!collect && results.length >= limit) return results;
         continue;
       }
       let sliceStart = performance.now();
@@ -618,17 +772,11 @@ export class IconPackManager {
         const id = pack.getPrefix() + item.name;
         const haystack =
           `${id} ${item.displayName} ${pack.getName()}`.toLowerCase();
-        if (
-          !seen.has(id) &&
-          !exclude?.(id) &&
-          words.every((word) => haystack.includes(word))
-        ) {
+        if (matchesWords(haystack, words, fuzzy)) {
           const icon = pack.getIcon(item.name);
-          if (icon) {
-            seen.add(id);
-            results.push({ ...icon, displayName: id });
-          }
-          if (results.length >= limit) return results;
+          if (icon) push({ ...icon, displayName: id });
+          if (!collect && results.length >= limit) return results;
+          if (full()) break;
         }
         // 原生小包同样让出主线程。 / Native packs also yield cooperatively.
         if (++count % 128 === 0 && performance.now() - sliceStart >= 4) {
@@ -637,7 +785,15 @@ export class IconPackManager {
         }
       }
     }
-    return cancelled() ? [] : results;
+    if (cancelled()) return [];
+    if (!collect) return results;
+    scored.sort(
+      (a, b) =>
+        b.score - a.score ||
+        a.icon.name.localeCompare(b.icon.name) ||
+        (a.icon.iconPackName ?? '').localeCompare(b.icon.iconPackName ?? ''),
+    );
+    return scored.slice(0, limit).map((entry) => entry.icon);
   }
 
   public async doesIconPackExist(iconPackName: string): Promise<boolean> {

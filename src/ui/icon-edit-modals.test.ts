@@ -99,7 +99,9 @@ vi.mock('obsidian', () => {
     },
   };
 });
-vi.mock('@app/lib/logger', () => ({ logger: { error: vi.fn() } }));
+vi.mock('@app/lib/logger', () => ({
+  logger: { error: vi.fn(), warn: vi.fn() },
+}));
 vi.mock('@app/lib/icon', () => ({ default: { getByPath: () => undefined } }));
 vi.mock('@app/lib/folder-note', () => ({
   getFolderNoteInheritedIcon: () => undefined,

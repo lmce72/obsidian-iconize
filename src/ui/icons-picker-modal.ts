@@ -5,6 +5,11 @@ import emoji from '@app/emoji';
 import { type Icon } from '@app/icon-pack-manager';
 import dom from '@app/lib/util/dom';
 import { saveIconToIconPack } from '@app/util';
+import IconPickerFilterModal, {
+  type PickerFilterState,
+} from './icon-picker-filter-modal';
+
+const FILTER_STORAGE_KEY = 'iconize:picker-filters';
 
 /** 分片搜索只返回有限结果，预览仅解析当前建议。 / Cooperative bounded search with on-demand previews. */
 export default class IconsPickerModal extends SuggestModal<Icon> {
@@ -16,6 +21,9 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
   private lastQuery = '';
   private lastResults: Icon[] = [];
   private refreshRequested = false;
+  private familyFilter = new Set<string>();
+  private fuzzySearch = false;
+  private sortByRelevance = true;
   public selectedColor?: string;
   public onSelect?: (iconName: string) => void;
   public onColor?: (color: string | undefined, query: string) => void;
@@ -31,6 +39,7 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
   ) {
     super(app);
     this.limit = 100;
+    this.loadFilterPreferences();
     plugin.trackModal(this);
     this.setPlaceholder('搜索图标名称或图标包 / Search icon or pack');
     this.resultContainerEl.classList.add('iconize-modal');
@@ -65,6 +74,19 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
         updateClear();
       });
       updateClear();
+      const filterButton = toolbar.createEl('button', {
+        cls: 'iconize-picker-filter',
+        attr: {
+          type: 'button',
+          'aria-label': '图标过滤器 / Icon filters',
+          title: '图标过滤器 / Icon filters',
+        },
+      });
+      setIcon(filterButton, 'filter');
+      filterButton.toggleClass('is-active', this.familyFilter.size > 0);
+      filterButton.addEventListener('click', () =>
+        this.openFilterModal(filterButton),
+      );
       const colorContainer = toolbar.createDiv({ cls: 'iconize-picker-color' });
       new ColorComponent(colorContainer)
         .setValue(this.selectedColor ?? '#808080')
@@ -135,6 +157,89 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
     super.onClose();
   }
 
+  /**
+   * 打开图标家族与搜索过滤 / Opens the icon-family and search filters.
+   */
+  private openFilterModal(button: HTMLElement): void {
+    const manager = this.plugin.getIconPackManager();
+    const families = manager.getIconPacks().map((pack) => ({
+      name: pack.getName(),
+      prefix: pack.getPrefix(),
+      size: pack.size,
+    }));
+    families.push({ name: 'Emoji', prefix: 'Emoji', size: 0 });
+    new IconPickerFilterModal(
+      this.app,
+      families,
+      {
+        packs: this.familyFilter,
+        fuzzy: this.fuzzySearch,
+        sortByRelevance: this.sortByRelevance,
+      },
+      (state: PickerFilterState | null) => {
+        if (!state) return;
+        this.familyFilter = state.packs;
+        this.fuzzySearch = state.fuzzy;
+        this.sortByRelevance = state.sortByRelevance;
+        button.toggleClass('is-active', this.familyFilter.size > 0);
+        this.saveFilterPreferences();
+        // 过滤条件改变后重新从第一批开始，旧结果全部作废。
+        // A filter change starts a fresh batch; previous results are obsolete.
+        this.seen.clear();
+        this.lastResults = [];
+        this.lastQuery = '';
+        this.refreshRequested = false;
+        this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        this.inputEl.focus();
+      },
+    ).open();
+  }
+
+  private loadFilterPreferences(): void {
+    try {
+      const raw = window.localStorage.getItem(FILTER_STORAGE_KEY);
+      if (!raw) return;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+      const value = parsed as Record<string, unknown>;
+      if (Array.isArray(value.packs)) {
+        this.familyFilter = new Set(
+          value.packs.filter(
+            (item): item is string => typeof item === 'string',
+          ),
+        );
+      }
+      if (typeof value.fuzzy === 'boolean') this.fuzzySearch = value.fuzzy;
+      if (typeof value.relevance === 'boolean')
+        this.sortByRelevance = value.relevance;
+    } catch (error) {
+      logger.warn(
+        '[Iconize] Could not read picker filter preferences:',
+        undefined,
+        error,
+      );
+    }
+  }
+
+  private saveFilterPreferences(): void {
+    try {
+      window.localStorage.setItem(
+        FILTER_STORAGE_KEY,
+        JSON.stringify({
+          packs: [...this.familyFilter],
+          fuzzy: this.fuzzySearch,
+          relevance: this.sortByRelevance,
+        }),
+      );
+    } catch (error) {
+      logger.warn(
+        '[Iconize] Could not save picker filter preferences:',
+        undefined,
+        error,
+      );
+    }
+  }
+
   async getSuggestions(query: string): Promise<Icon[]> {
     const request = ++this.request;
     // 让最新输入先到达，快速连续输入时旧查询无需遍历。 / Coalesce rapid input before scanning.
@@ -155,6 +260,11 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
     const exclude = excluded ? (id: string) => excluded.has(id) : undefined;
 
     const manager = this.plugin.getIconPackManager();
+    const allowEmoji =
+      this.familyFilter.size === 0 || this.familyFilter.has('Emoji');
+    const packFilter = new Set(
+      [...this.familyFilter].filter((name) => name !== 'Emoji'),
+    );
     const results: Icon[] = [];
     const emojiIcon = (unicode: string, name: string): Icon => ({
       name,
@@ -170,8 +280,14 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
       for (const id of this.plugin.getSettings().recentlyUsedIcons) {
         let item: Icon | null = null;
         if (emoji.isEmoji(id)) {
+          if (!allowEmoji) continue;
           item = emojiIcon(id, emoji.shortNames[id] ?? id);
         } else {
+          const owner = manager
+            .getIconPacks()
+            .find((pack) => id.startsWith(pack.getPrefix()));
+          if (packFilter.size && (!owner || !packFilter.has(owner.getName())))
+            continue;
           const found = manager
             .getIconPacks()
             .map((pack) =>
@@ -193,10 +309,15 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
         this.limit - results.length,
         cancelled,
         exclude,
+        {
+          packs: packFilter.size ? packFilter : undefined,
+          fuzzy: this.fuzzySearch,
+          sortByRelevance: this.sortByRelevance,
+        },
       )),
     );
     if (cancelled()) return [];
-    if (results.length < this.limit) {
+    if (results.length < this.limit && allowEmoji) {
       for (const [unicode, name] of Object.entries(emoji.shortNames)) {
         if (excluded?.has(name)) continue;
         if ((name + unicode).toLowerCase().includes(query.toLowerCase()))
