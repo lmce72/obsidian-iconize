@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { normalizeIconPack } from './index';
 import { PACK_MANIFEST_NAME } from './types';
@@ -151,5 +151,119 @@ describe('normalizeIconPack', () => {
     await expect(
       normalizeIconPack([file('notes.txt', 'hello')]),
     ).rejects.toThrow(/无法识别|Unrecognized/);
+  });
+
+  it('imports only the selected sets from an Iconify icon-sets archive', async () => {
+    const zip = zipSync({
+      'repo/json/aa.json': strToU8(
+        JSON.stringify({
+          prefix: 'aa',
+          width: 16,
+          height: 16,
+          icons: { home: { body: '<path d="M0 0h1v1H0z"/>' } },
+        }),
+      ),
+      'repo/json/bb.json': strToU8(
+        JSON.stringify({
+          prefix: 'bb',
+          width: 16,
+          height: 16,
+          icons: {
+            home: { body: '<path d="M1 1h1v1H1z"/>' },
+            star: { body: '<path d="M2 2h2"/>' },
+          },
+        }),
+      ),
+      'repo/collections.json': strToU8('{"aa":{"name":"A"}}'),
+      'repo/.build/generate.js': strToU8('module.exports = 1;'),
+    });
+    const offered: string[] = [];
+    const result = await normalizeIconPack([file('iconify.zip', zip)], {
+      selectIconifySets: async (sets) => {
+        offered.push(...sets.map((set) => set.prefix));
+        return [sets.find((set) => set.prefix === 'bb')!.path];
+      },
+    });
+
+    expect(result.format).toBe('iconify-archive');
+    expect(result.suggestedName).toBe('bb');
+    expect(result.iconCount).toBe(2);
+    expect(offered.sort()).toEqual(['aa', 'bb']);
+    expect(Object.keys(unzipSync(result.archive)).sort()).toEqual([
+      'home.svg',
+      'iconize-pack.json',
+      'star.svg',
+    ]);
+  });
+
+  it('uses each prefix as a folder when several sets are selected', async () => {
+    const zip = zipSync({
+      'repo/json/aa.json': strToU8(
+        JSON.stringify({
+          prefix: 'aa',
+          icons: { home: { body: '<path d="M0 0h1v1H0z"/>' } },
+        }),
+      ),
+      'repo/json/bb.json': strToU8(
+        JSON.stringify({
+          prefix: 'bb',
+          icons: { home: { body: '<path d="M1 1h1v1H1z"/>' } },
+        }),
+      ),
+    });
+    const result = await normalizeIconPack([file('sets.zip', zip)], {
+      selectIconifySets: async (sets) => sets.map((set) => set.path),
+    });
+
+    expect(result.iconCount).toBe(2);
+    expect(result.suggestedName).toBe('iconify');
+    expect(Object.keys(unzipSync(result.archive)).sort()).toEqual([
+      'aa/home.svg',
+      'bb/home.svg',
+      'iconize-pack.json',
+    ]);
+  });
+
+  it('cancels when no Iconify set is selected', async () => {
+    const zip = zipSync({
+      'repo/json/a.json': strToU8(
+        JSON.stringify({
+          prefix: 'a',
+          icons: { home: { body: '<path d="M0 0h1v1H0z"/>' } },
+        }),
+      ),
+      'repo/json/b.json': strToU8(
+        JSON.stringify({
+          prefix: 'b',
+          icons: { home: { body: '<path d="M1 1h1v1H1z"/>' } },
+        }),
+      ),
+    });
+    await expect(
+      normalizeIconPack([file('sets.zip', zip)], {
+        selectIconifySets: async () => null,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('imports a single Iconify set inside a zip without asking', async () => {
+    const zip = zipSync({
+      'repo/only.json': strToU8(
+        JSON.stringify({
+          prefix: 'only',
+          icons: { home: { body: '<path d="M0 0h1v1H0z"/>' } },
+        }),
+      ),
+      'repo/package.json': strToU8('{"name":"set"}'),
+    });
+    const select = vi.fn(async () => null);
+    const result = await normalizeIconPack([file('one.zip', zip)], {
+      selectIconifySets: select,
+    });
+
+    expect(result.format).toBe('iconify-archive');
+    expect(result.suggestedName).toBe('only');
+    expect(result.iconCount).toBe(1);
+    expect(select).not.toHaveBeenCalled();
   });
 });

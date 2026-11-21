@@ -4,6 +4,7 @@ import { IconPack } from '@app/icon-pack-manager/icon-pack';
 import { LUCIDE_ICON_PACK_NAME } from '@app/icon-pack-manager/lucide';
 import { LucideIconPackType } from '@app/settings/data';
 import IconPackBrowserModal from '@app/ui/icon-pack-browser-modal';
+import IconifySetPickerModal from '@app/ui/iconify-set-picker-modal';
 import { readFileSync } from '@app/util';
 import icon from '@app/lib/icon';
 import { logger } from '@app/lib/logger';
@@ -290,6 +291,10 @@ export class IconPackManagerPanel {
           .getIconPackManager()
           .importIconPackFromFiles(inputs, {
             onProgress: (message) => progress.setMessage(`Iconize：${message}`),
+            selectIconifySets: (sets) =>
+              new Promise<string[] | null>((resolve) => {
+                new IconifySetPickerModal(this.app, sets, resolve).open();
+              }),
           });
         if (!this.current(generation)) return;
         if (result.warnings.length)
@@ -307,6 +312,10 @@ export class IconPackManagerPanel {
         progress.hide();
       }
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        if (this.current(generation)) new Notice('Iconize：已取消导入。');
+        return;
+      }
       logger.error('Could not import icon pack', undefined, error);
       if (this.current(generation))
         new Notice(

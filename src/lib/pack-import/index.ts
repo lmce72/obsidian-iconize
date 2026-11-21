@@ -25,6 +25,8 @@ import { normalizeSvgDocument } from './svg';
 import {
   PACK_MANIFEST_NAME,
   type ConversionResult,
+  type GeneratedIcon,
+  type IconifySetInfo,
   type ImportContext,
   type NormalizedIconPack,
   type PackInputFile,
@@ -35,9 +37,21 @@ export { packNameFromFileName } from './names';
 export { PACK_MANIFEST_NAME } from './types';
 export type {
   IconPackFormat,
+  IconifySetInfo,
   NormalizedIconPack,
   PackInputFile,
 } from './types';
+
+/** 导入选项 / Import options shared by the normalizer and the UI. */
+export interface PackImportOptions {
+  signal?: AbortSignal;
+  onProgress?: (message: string) => void;
+  /**
+   * 让用户选择归档中要导入的 Iconify 图标集；返回 `null` 表示取消。
+   * Asks the user which Iconify sets to import. Returning `null` cancels.
+   */
+  selectIconifySets?: (sets: IconifySetInfo[]) => Promise<string[] | null>;
+}
 
 const FONT_EXTENSIONS = ['.ttf', '.otf', '.woff', '.woff2'];
 const CSS_EXTENSIONS = ['.css'];
@@ -102,11 +116,148 @@ async function fontInputsFromArchive(
 }
 
 /**
+ * 找出归档中的 Iconify 图标集 / Finds Iconify sets inside an archive.
+ *
+ * Iconify 的 icon-sets 仓库把数百个图标集放在 `json/*.json`，没有 SVG。优先只认
+ * 这个标志目录；其它归档则退回到全部 JSON，并只解析前几个确认结构。
+ *
+ * The Iconify icon-sets repository keeps hundreds of sets in `json/*.json` with no SVG.
+ * That marker directory wins; other archives fall back to all JSON entries, parsing only
+ * the first few to confirm the structure.
+ */
+async function findIconifySets(
+  reader: ArchiveReader,
+): Promise<IconifySetInfo[]> {
+  const preferred = reader.names.filter((name) =>
+    /(^|\/)json\/[^/]+\.json$/i.test(name),
+  );
+  if (preferred.length) {
+    for (const path of preferred.slice(0, 3)) {
+      const text = await reader.readText(path);
+      if (!text) continue;
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (isIconifyJson(parsed)) {
+          return preferred.map((candidate) => ({
+            path: candidate,
+            prefix: baseName(candidate).replace(/\.json$/i, ''),
+          }));
+        }
+      } catch {
+        // Not an Iconify JSON; keep looking among the next candidates.
+      }
+    }
+    return [];
+  }
+
+  // 没有标志目录时逐个校验，避免把 package.json 等普通文件列为图标集。
+  // Without the marker directory, verify each JSON so ordinary files such as
+  // package.json are not offered as icon sets.
+  const found: IconifySetInfo[] = [];
+  for (const path of reader.names.filter((name) =>
+    name.toLowerCase().endsWith('.json'),
+  )) {
+    const text = await reader.readText(path);
+    if (!text) continue;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (isIconifyJson(parsed)) {
+        found.push({
+          path,
+          prefix: baseName(path).replace(/\.json$/i, ''),
+        });
+      }
+    } catch {
+      // Ignore non-JSON or non-Iconify entries.
+    }
+  }
+  return found;
+}
+
+/**
+ * 转换归档中的一个或多个 Iconify 图标集 / Converts one or more Iconify sets.
+ *
+ * 多个图标集用各自的 prefix 作为目录，避免同名图标互相覆盖；只选一个时保持平铺。
+ * Multiple sets use their own prefix as a folder so equal names never collide; a single
+ * selected set stays flat.
+ */
+async function convertIconifyArchive(
+  reader: ArchiveReader,
+  sets: IconifySetInfo[],
+  context: ImportContext,
+  options: PackImportOptions,
+): Promise<ConversionResult> {
+  let selected = sets;
+  if (sets.length > 1 && options.selectIconifySets) {
+    const chosen = await options.selectIconifySets(sets);
+    if (!chosen || !chosen.length) {
+      const error = new Error('已取消导入 / Import cancelled');
+      error.name = 'AbortError';
+      throw error;
+    }
+    selected = sets.filter((set) => chosen.includes(set.path));
+  }
+  if (!selected.length)
+    throw new Error('没有选择任何 Iconify 图标集 / No Iconify sets selected');
+
+  const icons: GeneratedIcon[] = [];
+  const warnings: string[] = [];
+  let skipped = 0;
+  for (let index = 0; index < selected.length; index++) {
+    throwIfAborted(context.signal);
+    const set = selected[index];
+    context.onProgress?.(
+      `正在转换 Iconify 图标集 ${index + 1}/${selected.length}：${set.prefix}`,
+    );
+    const text = await reader.readText(set.path);
+    if (text === null) {
+      skipped++;
+      warnings.push(`${set.prefix}：无法读取`);
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      skipped++;
+      warnings.push(`${set.prefix}：JSON 无法解析`);
+      continue;
+    }
+    if (!isIconifyJson(parsed)) {
+      skipped++;
+      warnings.push(`${set.prefix}：不是 Iconify 图标集`);
+      continue;
+    }
+    const converted = await convertIconifyJson(parsed, context);
+    const folder =
+      selected.length > 1 ? (converted.suggestedName ?? set.prefix) : undefined;
+    for (const convertedIcon of converted.icons)
+      icons.push({ ...convertedIcon, folder });
+    skipped += converted.skipped;
+    warnings.push(
+      ...converted.warnings.map((warning) => `${set.prefix}：${warning}`),
+    );
+    await context.yieldToMain?.();
+  }
+
+  if (!icons.length)
+    throw new Error('没有转换出任何 Iconify 图标 / No Iconify icons produced');
+  return {
+    format: 'iconify-archive',
+    label: 'Iconify 图标集 / Iconify sets',
+    icons,
+    skipped,
+    warnings,
+    suggestedName: selected.length === 1 ? selected[0].prefix : 'iconify',
+  };
+}
+/**
  * 按标志性内容选择转换器 / Dispatches to the converter selected by marker content.
  */
 export async function convertPackInputs(
   inputs: PackInputFile[],
   context: ImportContext,
+  options: PackImportOptions = {},
 ): Promise<ConversionResult> {
   if (!inputs.length)
     throw new Error('没有选择任何文件 / No files were selected');
@@ -147,6 +298,12 @@ export async function convertPackInputs(
       if (fontInputs.length) return convertFontPackage(fontInputs, context);
     }
     if (svgNames.length) return convertSvgArchive(reader, context);
+    // Iconify 的 icon-sets 仓库只有 JSON（外加构建脚本），必须比 JS 模块先判断。
+    // The Iconify icon-sets repository is JSON-only (plus build scripts); check it before
+    // treating the archive as a JS module package.
+    const iconifySets = await findIconifySets(reader);
+    if (iconifySets.length)
+      return convertIconifyArchive(reader, iconifySets, context, options);
     if (reader.names.some(isJsFile))
       return convertJsModuleArchive(reader, context);
     if (fontNames.length) {
@@ -198,17 +355,14 @@ export async function convertPackInputs(
  */
 export async function normalizeIconPack(
   inputs: PackInputFile[],
-  options: {
-    signal?: AbortSignal;
-    onProgress?: (message: string) => void;
-  } = {},
+  options: PackImportOptions = {},
 ): Promise<NormalizedIconPack> {
   const context: ImportContext = {
     signal: options.signal,
     onProgress: options.onProgress,
     yieldToMain: () => yieldToMain('user-visible'),
   };
-  const converted = await convertPackInputs(inputs, context);
+  const converted = await convertPackInputs(inputs, context, options);
   if (!converted.icons.length)
     throw new Error('没有转换出任何可用的图标 / No usable icons were produced');
 

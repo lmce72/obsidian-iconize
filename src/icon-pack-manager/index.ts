@@ -18,6 +18,7 @@ import { buildIndex } from '@app/lib/icon-indexing';
 import {
   normalizeIconPack,
   packNameFromFileName,
+  type IconifySetInfo,
   type NormalizedIconPack,
   type PackInputFile,
 } from '@app/lib/pack-import';
@@ -333,6 +334,7 @@ export class IconPackManager {
       name?: string;
       signal?: AbortSignal;
       onProgress?: (message: string) => void;
+      selectIconifySets?: (sets: IconifySetInfo[]) => Promise<string[] | null>;
     } = {},
   ): Promise<NormalizedIconPack & { name: string }> {
     const normalized = await normalizeIconPack(inputs, options);

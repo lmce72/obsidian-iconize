@@ -572,3 +572,43 @@
   white-space: pre;
   font-size: var(--font-ui-smaller);
 }
+
+/* Iconify 图标集选择 / Iconify set picker */
+.iconize-iconify-set-list {
+  max-block-size: 48vh;
+  overflow-y: auto;
+  margin-block: 8px;
+  padding: 4px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+.iconize-iconify-set-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.iconize-iconify-set-row:hover {
+  background-color: var(--background-modifier-hover);
+}
+.iconize-iconify-set-row input {
+  flex: 0 0 auto;
+}
+.iconize-iconify-set-prefix {
+  flex: 0 0 auto;
+  min-inline-size: 6ch;
+  font-weight: var(--font-medium);
+}
+.iconize-iconify-set-path {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.iconize-iconify-set-count {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}

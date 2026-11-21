@@ -17,11 +17,22 @@ export type IconPackFormat =
   | 'iconize-zip'
   | 'svg-archive'
   | 'iconify-json'
+  | 'iconify-archive'
   | 'svg-sprite'
   | 'svg-file'
   | 'npm-package'
   | 'font-package'
   | 'js-icon-module';
+
+/** 归档中的一个 Iconify 图标集 / One Iconify set inside an archive. */
+export interface IconifySetInfo {
+  /** 归档内的 JSON 路径 / JSON entry path inside the archive. */
+  path: string;
+  /** Iconify 前缀（通常来自文件名）/ Iconify prefix, usually derived from the file name. */
+  prefix: string;
+  /** info.name，可选 / Optional human-readable name. */
+  name?: string;
+}
 
 /** 用户选中的一个文件 / One file selected by the user. */
 export interface PackInputFile {
