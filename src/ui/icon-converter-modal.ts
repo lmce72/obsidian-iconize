@@ -90,7 +90,8 @@ export default class IconConverterModal extends Modal {
               status.setText('无法访问剪贴板，请手动复制已选中的输出。');
             });
         }),
-      );
+      )
+      .settingEl.addClass('iconize-modal-footer');
   }
 
   onClose(): void {

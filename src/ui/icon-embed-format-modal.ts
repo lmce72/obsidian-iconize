@@ -142,7 +142,8 @@ export default class IconEmbedFormatModal extends Modal {
           .setButtonText(this.options.confirmText)
           .setCta()
           .onClick(() => this.confirm()),
-      );
+      )
+      .settingEl.addClass('iconize-modal-footer');
   }
 
   private confirm(): void {

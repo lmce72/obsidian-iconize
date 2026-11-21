@@ -127,7 +127,8 @@ export default class IconDetailsModal extends Modal {
           this.close();
           this.callbacks.closeSearch();
         }),
-      );
+      )
+      .settingEl.addClass('iconize-modal-footer');
   }
 
   onClose(): void {

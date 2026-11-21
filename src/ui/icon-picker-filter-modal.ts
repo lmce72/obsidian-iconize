@@ -101,7 +101,8 @@ export default class IconPickerFilterModal extends Modal {
               sortByRelevance: this.relevance,
             }),
           ),
-      );
+      )
+      .settingEl.addClass('iconize-modal-footer');
   }
 
   private renderList(): void {

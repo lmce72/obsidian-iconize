@@ -778,3 +778,14 @@
 .iconize-icon-detail-code {
   margin-block-end: 8px;
 }
+
+/* 弹窗底部操作栏固定可见 / Keep modal footer actions visible while content scrolls */
+.iconize-modal-footer {
+  position: sticky;
+  inset-block-end: 0;
+  z-index: 2;
+  margin-block-start: 8px;
+  padding-block: 8px;
+  border-block-start: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
