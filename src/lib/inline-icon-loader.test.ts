@@ -3,7 +3,9 @@ import type IconizePlugin from '@app/main';
 import { InlineIconLoader } from './inline-icon-loader';
 import { yieldToMain } from './task-scheduler';
 
-vi.mock('./task-scheduler', () => ({ yieldToMain: vi.fn(() => Promise.resolve()) }));
+vi.mock('./task-scheduler', () => ({
+  yieldToMain: vi.fn(() => Promise.resolve()),
+}));
 vi.mock('obsidian', () => ({
   MarkdownView: class {},
   sanitizeHTMLToDom: vi.fn((markup: string) => {
@@ -19,7 +21,9 @@ const loaders: InlineIconLoader[] = [];
 
 function gate<T>() {
   let finish!: (value: T) => void;
-  const promise = new Promise<T>((resolve) => { finish = resolve; });
+  const promise = new Promise<T>((resolve) => {
+    finish = resolve;
+  });
   return { promise, finish };
 }
 
@@ -28,16 +32,29 @@ async function settle() {
 }
 
 function fixture() {
-  const current = { editor: { cm: { dispatch: vi.fn() } }, previewMode: { rerender: vi.fn() } };
-  const other = { editor: { cm: { dispatch: vi.fn() } }, previewMode: { rerender: vi.fn() } };
+  const current = {
+    editor: { cm: { dispatch: vi.fn() } },
+    previewMode: { rerender: vi.fn() },
+  };
+  const other = {
+    editor: { cm: { dispatch: vi.fn() } },
+    previewMode: { rerender: vi.fn() },
+  };
   const resolve = vi.fn(async (_id: string) => ({ svgElement: MARKUP }));
   const find = vi.fn((query: string) => {
     const name = query.replace(/^pa/i, '');
-    return name === 'missing' ? undefined : { entry: { id: `Pa${name.toLowerCase()}` } };
+    return name === 'missing'
+      ? undefined
+      : { entry: { id: `Pa${name.toLowerCase()}` } };
   });
   const plugin = {
     iconResolver: { find, peek: vi.fn(() => undefined), resolve },
-    app: { workspace: { getActiveViewOfType: vi.fn(() => current), getLeavesOfType: vi.fn(() => [current, other]) } },
+    app: {
+      workspace: {
+        getActiveViewOfType: vi.fn(() => current),
+        getLeavesOfType: vi.fn(() => [current, other]),
+      },
+    },
     releaseIconSources: vi.fn(),
   } as unknown as IconizePlugin;
   const loader = new InlineIconLoader(plugin);
@@ -93,7 +110,11 @@ describe('inline icon loading', () => {
     expect(element.querySelector('svg')).not.toBeNull();
     expect(f.current.previewMode.rerender).not.toHaveBeenCalled();
     expect(f.current.editor.cm.dispatch).not.toHaveBeenCalled();
-    expect(f.loader.getStats()).toEqual({ pending: 0, failed: 0, inFlight: false });
+    expect(f.loader.getStats()).toEqual({
+      pending: 0,
+      failed: 0,
+      inFlight: false,
+    });
   });
 
   it('does not fill a detached widget explicitly released during its source read', async () => {
@@ -109,7 +130,11 @@ describe('inline icon loading', () => {
     await settle();
     document.body.append(element);
     expect(element.querySelector('svg')).toBeNull();
-    expect(f.loader.getStats()).toEqual({ pending: 0, failed: 0, inFlight: false });
+    expect(f.loader.getStats()).toEqual({
+      pending: 0,
+      failed: 0,
+      inFlight: false,
+    });
   });
 
   it('refreshes only the editor that requested a legacy repaint', async () => {
@@ -193,7 +218,11 @@ describe('inline icon loading', () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(element.querySelector('svg')).toBeNull();
     expect(f.resolve).toHaveBeenCalledTimes(1);
-    expect(f.loader.getStats()).toEqual({ pending: 0, failed: 0, inFlight: false });
+    expect(f.loader.getStats()).toEqual({
+      pending: 0,
+      failed: 0,
+      inFlight: false,
+    });
     expect(vi.getTimerCount()).toBe(0);
   });
 

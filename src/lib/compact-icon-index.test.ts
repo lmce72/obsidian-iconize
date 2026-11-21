@@ -163,7 +163,7 @@ describe('CompactIconIndex', () => {
 
   it('aborts an unfinished lookup table immediately after yielding', async () => {
     let clock = 0;
-    vi.spyOn(performance, 'now').mockImplementation(() => clock += 5);
+    vi.spyOn(performance, 'now').mockImplementation(() => (clock += 5));
     const controller = new AbortController();
     const index = new CompactIconIndex('Sy', 2048, controller.signal);
     for (let row = 0; row < 2048; row++) index.append(entry(`Item${row}`));
@@ -171,8 +171,9 @@ describe('CompactIconIndex', () => {
     await expect(index.finish()).rejects.toMatchObject({ name: 'AbortError' });
     expect(() => index.append(entry('AfterUnload'))).toThrow('Aborted');
     await expect(index.finish()).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(CompactIconIndex.fromEntries([entry('One')], controller.signal))
-      .rejects.toMatchObject({ name: 'AbortError' });
+    await expect(
+      CompactIconIndex.fromEntries([entry('One')], controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
     vi.mocked(yieldToMain).mockImplementation(async () => {});
   });
 });

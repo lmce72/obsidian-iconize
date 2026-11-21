@@ -319,6 +319,126 @@ export function parseConfig(raw: string): ConfigData {
   return data;
 }
 
+export interface LenientConfigResult {
+  data: ConfigData;
+  warnings: string[];
+}
+
+/**
+ * 尽量保留可用的配置 / Recovers as much usable configuration as possible.
+ *
+ * JSON 配置只是数据，不是可执行内容。损坏的一条记录或一个设置不应该让用户
+ * 已经设置好的其它图标和规则全部作废：这里逐条过滤无效记录、逐项重置无效设置，
+ * 并把原因写进 warnings。语法损坏的 JSON 无法逐条恢复，调用方应先备份原文件。
+ *
+ * A JSON config is data, never executable content. One broken record or setting must not
+ * discard every other icon and rule the user configured: invalid records are filtered,
+ * invalid settings fall back to their defaults, and the reasons are collected in
+ * `warnings`. Syntactically broken JSON cannot be recovered field by field; the caller
+ * must back up the original file first.
+ */
+export function parseConfigLenient(raw: string): LenientConfigResult {
+  const parsed: unknown = JSON.parse(raw);
+  const warnings: string[] = [];
+  const data: ConfigData = {};
+  const source = isObject(parsed) ? parsed : {};
+  if (!isObject(parsed)) warnings.push('配置不是对象，已使用默认设置');
+
+  for (const [path, value] of Object.entries(source)) {
+    if (path === 'settings') continue;
+    if (typeof value === 'string' || typeof value === 'boolean') {
+      put(data, path, value);
+      continue;
+    }
+    if (
+      isObject(value) &&
+      (value.iconName === null || typeof value.iconName === 'string') &&
+      (value.iconColor === undefined || typeof value.iconColor === 'string')
+    ) {
+      put(data, path, value);
+      continue;
+    }
+    warnings.push(`已忽略无效图标记录：${path}`);
+  }
+
+  const rawSettings = isObject(source.settings) ? source.settings : {};
+  if (!isObject(source.settings))
+    warnings.push('缺少 settings，已使用默认设置');
+  const settings: ConfigData = {};
+  for (const [key, fallback] of Object.entries(DEFAULT_SETTINGS)) {
+    const value = rawSettings[key];
+    if (value === undefined) {
+      settings[key] = cloneConfig(fallback);
+      continue;
+    }
+    const valid =
+      fallback === null
+        ? value === null || typeof value === 'string'
+        : Array.isArray(fallback)
+          ? Array.isArray(value)
+          : typeof fallback === 'object'
+            ? isObject(value)
+            : typeof value === typeof fallback;
+    if (valid) settings[key] = value;
+    else {
+      settings[key] = cloneConfig(fallback);
+      warnings.push(`已重置无效设置：${key}`);
+    }
+  }
+  // 保留未来版本写入的未知设置，避免旧版插件把新字段删掉。
+  // Keep unknown settings written by a newer version instead of dropping them.
+  for (const [key, value] of Object.entries(rawSettings)) {
+    if (key in settings) continue;
+    if (
+      typeof value === 'string' ||
+      typeof value === 'boolean' ||
+      typeof value === 'number' ||
+      isObject(value) ||
+      Array.isArray(value)
+    )
+      settings[key] = value;
+  }
+
+  if (Array.isArray(settings.recentlyUsedIcons)) {
+    const before = settings.recentlyUsedIcons.length;
+    const recent = (settings.recentlyUsedIcons as unknown[]).filter(
+      (value) => typeof value === 'string',
+    );
+    if (recent.length !== before) warnings.push('已过滤无效的最近使用图标');
+    settings.recentlyUsedIcons = recent;
+  }
+  if (Array.isArray(settings.rules)) {
+    const before = settings.rules.length;
+    const rules = (settings.rules as unknown[]).filter(
+      (value) =>
+        isObject(value) &&
+        typeof value.rule === 'string' &&
+        typeof value.icon === 'string',
+    );
+    if (rules.length !== before) warnings.push('已过滤无效的自定义规则');
+    settings.rules = rules;
+  }
+  if (settings.iconIdentifier === '') {
+    settings.iconIdentifier = DEFAULT_SETTINGS.iconIdentifier;
+    warnings.push('图标标识不能为空，已恢复默认');
+  }
+  const delay = settings.autoConvertDelay;
+  if (
+    typeof delay === 'number' &&
+    (!Number.isInteger(delay) || delay < 1 || delay > 3600)
+  ) {
+    settings.autoConvertDelay = DEFAULT_SETTINGS.autoConvertDelay;
+    warnings.push('转换延迟无效，已恢复默认');
+  }
+  if (!['data', 'svg', 'file'].includes(settings.iconEmbedFormat as string)) {
+    settings.iconEmbedFormat = DEFAULT_SETTINGS.iconEmbedFormat;
+    warnings.push('嵌入格式无效，已恢复默认');
+  }
+
+  put(data, 'settings', settings);
+  return { data, warnings };
+}
+
 /** Apply the committed snapshot while preserving later edits made during I/O. */
 export function rebaseConfig(
   snapshot: ConfigData,

@@ -116,6 +116,22 @@ describe('icon conversion pipeline', () => {
     expect(f.state.text).not.toContain('base64');
   });
 
+  it('lets a single run override the configured format', async () => {
+    const asSvg = fixture('data');
+    await asSvg.conversion.convertEditor(asSvg.editor, undefined, false, 'svg');
+    expect(asSvg.state.text).toMatch(/^<svg /);
+
+    const asData = fixture('svg');
+    await asData.conversion.convertEditor(
+      asData.editor,
+      undefined,
+      false,
+      'data',
+    );
+    expect(asData.state.text).toMatch(/^<img /);
+    expect(asData.state.text).toContain('base64,');
+  });
+
   it('does not overwrite edits or a different file after asynchronous resolution', async () => {
     const f = fixture();
     vi.spyOn(f.conversion, 'getSvg').mockImplementation(async () => {

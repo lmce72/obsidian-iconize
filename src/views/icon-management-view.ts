@@ -108,7 +108,7 @@ export class IconPackManagerPanel {
   private listEl: HTMLElement;
   private moreEl: HTMLElement;
   private visibleCount = PAGE_SIZE;
-  private importingZip = false;
+  private importingPack = false;
   private readonly onIconsLoaded = () => {
     if (this.plugin.isIconLoadingComplete()) this.renderReady();
   };
@@ -168,22 +168,31 @@ export class IconPackManagerPanel {
         }),
       );
     new Setting(root)
-      .setName('导入 ZIP 图标包')
-      .setDesc('选择本地 ZIP 文件，文件名将作为图标包名称。')
+      .setName('导入图标包')
+      .setDesc(
+        '支持 ZIP / tar.gz、Iconify JSON、SVG 或 sprite、字体与 CSS。自动识别标准，只保留图标部分，文件名或图标集前缀作为包名。',
+      )
       .addButton((button) =>
-        button.setButtonText('导入 ZIP').onClick(() => {
-          if (this.importingZip) return;
+        button.setButtonText('导入').onClick(() => {
+          if (this.importingPack) return;
           const generation = this.generation;
           const input = root.ownerDocument.createElement('input');
           input.type = 'file';
-          input.accept = '.zip,application/zip';
+          input.multiple = true;
+          input.accept =
+            '.zip,.json,.svg,.tgz,.tar.gz,.ttf,.otf,.woff,.woff2,.css,application/zip,application/json,image/svg+xml,font/ttf,font/otf,font/woff,font/woff2,text/css';
           input.onchange = () => {
-            const file = input.files?.[0];
-            if (!file || !this.current(generation) || this.importingZip) return;
-            this.importingZip = true;
+            const files = Array.from(input.files ?? []);
+            if (
+              !files.length ||
+              !this.current(generation) ||
+              this.importingPack
+            )
+              return;
+            this.importingPack = true;
             button.setDisabled(true);
-            void this.importZip(file, generation).finally(() => {
-              this.importingZip = false;
+            void this.importPack(files, generation).finally(() => {
+              this.importingPack = false;
               if (this.current(generation)) button.setDisabled(false);
             });
           };
@@ -254,37 +263,56 @@ export class IconPackManagerPanel {
     this.refresh();
   }
 
-  private async importZip(file: File, generation: number): Promise<void> {
-    const name = file.name.slice(0, -4);
-    const locks = operationLocks(this.plugin);
+  private async importPack(files: File[], generation: number): Promise<void> {
     if (!this.current(generation)) return;
-    if (locks.has(name)) {
-      new Notice('图标包正在处理中，请稍后重试。');
-      return;
-    }
-    locks.add(name);
+    // 包名要等归一化后才能确定（Iconify 用 prefix、字体用家族名），因此这里不再按
+    // 文件名预锁；同一面板的并发由 importingPack 串行化，跨窗口的同名注册由管理器
+    // 自己的 importing 集合拦截。
+    //
+    // The pack name is only known after normalization (Iconify prefix, font family), so
+    // there is no file-name lock here. The panel serializes its own imports with
+    // importingPack, and the manager's importing set rejects concurrent registrations of
+    // the same name across windows.
     this.refreshAll();
     try {
-      if (!file.name.toLowerCase().endsWith('.zip')) {
-        if (this.current(generation)) new Notice('请选择 ZIP 文件。');
-        return;
-      }
-      if (!name || name === '.' || name === '..' || /[\\/]/.test(name)) {
-        if (this.current(generation)) new Notice('ZIP 文件名无效。');
-        return;
-      }
-      const bytes = await file.arrayBuffer();
+      const inputs = await Promise.all(
+        files.map(async (file) => ({
+          fileName: file.name,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        })),
+      );
+      // 读取期间面板可能已关闭；此时不应留下任何进度提示。
+      // The panel may close while reading; no progress notice should outlive it.
       if (!this.current(generation)) return;
-      await this.plugin.getIconPackManager().registerIconPack(name, bytes);
-      if (!this.current(generation)) return;
-      this.refreshAll();
-      if (this.current(generation)) new Notice(`图标包 ${name} 已导入。`);
+      const progress = new Notice('Iconize：正在识别图标包…', 0);
+      try {
+        const result = await this.plugin
+          .getIconPackManager()
+          .importIconPackFromFiles(inputs, {
+            onProgress: (message) => progress.setMessage(`Iconize：${message}`),
+          });
+        if (!this.current(generation)) return;
+        if (result.warnings.length)
+          logger.info(
+            `Icon pack '${result.name}' warnings: ${result.warnings.join('; ')}`,
+          );
+        this.refreshAll();
+        const detail = result.warnings.length
+          ? `（${result.warnings.slice(0, 2).join('；')}）`
+          : '';
+        new Notice(
+          `已导入 ${result.name}（${result.label}）：${result.iconCount} 个图标。${detail}`,
+        );
+      } finally {
+        progress.hide();
+      }
     } catch (error) {
-      logger.error('Could not import ZIP icon pack', undefined, error);
+      logger.error('Could not import icon pack', undefined, error);
       if (this.current(generation))
-        new Notice('导入 ZIP 图标包失败，请检查文件及控制台。');
+        new Notice(
+          `导入失败：${error instanceof Error ? error.message : '请检查文件与控制台。'}`,
+        );
     } finally {
-      locks.delete(name);
       this.refreshAll();
     }
   }

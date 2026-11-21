@@ -16,6 +16,7 @@ import {
   ZipSourceChangedError,
 } from './zip-range-reader';
 import { yieldToMain } from './task-scheduler';
+import { PACK_MANIFEST_NAME } from './pack-import/types';
 
 // 整个插件共享预算，不能每包各自允许几十 MiB。 / One budget across all sources, not one allowance per pack.
 const archiveCache = new ZipCache<ZipSource, ZipDirectory>(
@@ -136,9 +137,9 @@ export class ZipSource implements IconSource {
    * 用户安装的往往是别的版本，导致固定路径匹配不到、图标包静默索引为 0。
    * 匹配版本段之后的部分（`svgs/solid/`）可以让图标包跨版本继续工作。
    */
-  private relaxedExtraPath(): string {
-    const firstSlash = this.extraPath.indexOf('/');
-    return firstSlash === -1 ? '' : this.extraPath.substring(firstSlash + 1);
+  private relaxedExtraPath(extraPath: string): string {
+    const firstSlash = extraPath.indexOf('/');
+    return firstSlash === -1 ? '' : extraPath.substring(firstSlash + 1);
   }
 
   /**
@@ -170,6 +171,13 @@ export class ZipSource implements IconSource {
     const generation = this.generation;
     const directory = await this.open(true);
     const names = await directory.listNames();
+    // 归一化导入的归档自带清单：图标根目录在导入时已经选好，不能再套用按包名
+    // 硬编码的预定义路径（否则同名自定义包会被过滤成空包）。
+    //
+    // Normalized imports carry a manifest: their icon root was already selected at import
+    // time, so a predefined path keyed by pack name must not be applied again (it would
+    // filter a same-named custom pack down to zero icons).
+    const extraPath = names.includes(PACK_MANIFEST_NAME) ? '' : this.extraPath;
     // 名称数组先转交调用者，再入 LRU，缓存永远不持有列举用的百万字符串。
     // Transfer temporary names before caching: the LRU must never retain the listing array.
     if (generation === this.generation) keepArchive(this, directory);
@@ -196,9 +204,9 @@ export class ZipSource implements IconSource {
       }
     }
     const candidates = [
-      this.extraPath,
-      this.relaxedExtraPath(),
-      this.extraPath.substring(this.extraPath.lastIndexOf('/') + 1),
+      extraPath,
+      this.relaxedExtraPath(extraPath),
+      extraPath.substring(extraPath.lastIndexOf('/') + 1),
     ].filter((candidate) => candidate !== '');
     let best = candidates.length;
     const entries: RawEntry[] = [];
@@ -213,7 +221,7 @@ export class ZipSource implements IconSource {
         /(^|\/)sprites(-full)?\/[^/]+\.svg$/i.test(name) &&
         individualDirectories.has(name.toLowerCase());
       const svg = this.isSvg(name) && !isDistributionSheet;
-      if (svg && !this.extraPath) entries.push({ path: name });
+      if (svg && !extraPath) entries.push({ path: name });
       else if (svg) {
         const rank = candidates.findIndex((candidate) =>
           this.underFragment(name, candidate),

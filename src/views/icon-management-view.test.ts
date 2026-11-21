@@ -140,9 +140,16 @@ vi.mock('obsidian', () => {
     Modal,
     Setting,
     Notice: class {
-      constructor(message: string) {
+      message: string;
+      constructor(message: string, _timeout?: number) {
+        this.message = message;
         state.notices.push(message);
       }
+      setMessage(message: string) {
+        this.message = message;
+        state.notices.push(message);
+      }
+      hide() {}
     },
   };
 });
@@ -202,6 +209,15 @@ async function fixture(packs: IconPack[] = []) {
     getIconPackByName: (name: string) =>
       packs.find((item) => item.getName() === name),
     registerIconPack: vi.fn(async () => {}),
+    importIconPackFromFiles: vi.fn(async () => ({
+      name: 'new',
+      format: 'svg-archive',
+      label: 'SVG 图标包',
+      iconCount: 2,
+      skipped: 0,
+      warnings: [],
+      suggestedName: 'new',
+    })),
     getFileManager: () => ({ createFile }),
     getPath: () => 'icons',
     removeIconPack: vi.fn(async (selected: IconPack) => {
@@ -313,12 +329,27 @@ describe('icon pack management view', () => {
       new Promise<ArrayBuffer>((resolve) => {
         finish = resolve;
       });
-    selectFile(f.view.contentEl, '导入 ZIP', file);
+    selectFile(f.view.contentEl, '导入', file);
     await f.view.onClose();
     finish(new ArrayBuffer(0));
     await flush();
-    expect(f.manager.registerIconPack).not.toHaveBeenCalled();
+    expect(f.manager.importIconPackFromFiles).not.toHaveBeenCalled();
     expect(state.notices).toEqual([]);
+  });
+
+  it('imports any supported file through the normalizer entry point', async () => {
+    const f = await fixture();
+    const bytes = new Uint8Array([1, 2, 3]);
+    const file = new File([bytes], 'lucide.zip');
+    file.arrayBuffer = async () => bytes.buffer;
+    selectFile(f.view.contentEl, '导入', file);
+    await flush();
+    expect(f.manager.importIconPackFromFiles).toHaveBeenCalledTimes(1);
+    const [inputs] = f.manager.importIconPackFromFiles.mock.calls[0];
+    expect(inputs).toEqual([{ fileName: 'lucide.zip', bytes }]);
+    expect(state.notices.some((notice) => notice.includes('已导入 new'))).toBe(
+      true,
+    );
   });
 
   it('locks SVG import against deletion and stops after the selected pack was replaced', async () => {
@@ -412,4 +443,3 @@ describe('icon pack management view', () => {
     expect(adapter.remove).not.toHaveBeenCalled();
   });
 });
-

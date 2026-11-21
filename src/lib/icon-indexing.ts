@@ -217,15 +217,26 @@ export function resolveEntryIds(
   });
 
   // 第三趟：文件名与目录名都相同的两个图标（如 a/x/icon.svg 与 b/x/icon.svg）仍会冲突，用数字区分。
-  const seen = new Map<string, number>();
+  // 数字后缀本身也可能撞上另一个图标的原名（device-gamepad 的 `2` 与 device-gamepad-2），
+  // 因此必须一直递增到全局唯一，而不是只在冲突组内计数。
+  //
+  // Third pass: two icons with identical file and folder names still collide and get a
+  // numeric suffix. That suffix can itself hit another icon's real name (the `2` of
+  // device-gamepad vs device-gamepad-2), so keep incrementing until the identifier is
+  // globally unique instead of counting only inside the collision group.
+  const taken = new Set<string>();
   for (const entry of entries) {
-    const key = entry.id.toLowerCase();
-    const occurrence = seen.get(key) ?? 0;
-    seen.set(key, occurrence + 1);
-
-    if (occurrence > 0) {
-      entry.name = `${entry.name}${occurrence + 1}`;
-      entry.id = `${prefix}${entry.name}`;
+    const base = entry.name;
+    let name = base;
+    let suffix = 1;
+    while (taken.has(`${prefix}${name}`.toLowerCase())) {
+      suffix++;
+      name = `${base}${suffix}`;
+    }
+    taken.add(`${prefix}${name}`.toLowerCase());
+    if (name !== base) {
+      entry.name = name;
+      entry.id = `${prefix}${name}`;
     }
   }
 
@@ -396,17 +407,22 @@ export async function resolveEntryIdsCompact(
   }
   duplicates.clear();
   slots.fill(0);
-  const occurrences = new Map<number, number>();
   const entries = new CompactIconIndex(prefix, valid, signal);
   for (let row = 0; row < valid; row++) {
-    const slot = slotFor(names[row].toLowerCase());
-    if (slots[slot]) {
-      const occurrence = (occurrences.get(slot) ?? 1) + 1;
-      occurrences.set(slot, occurrence);
-      names[row] += occurrence;
-    } else slots[slot] = row + 1;
-    const path = sorted[row].path,
-      name = names[row];
+    const base = names[row];
+    let name = base;
+    let slot = slotFor(name.toLowerCase());
+    let suffix = 1;
+    // 后缀可能撞上另一个图标的真实名称；重新探测直到全局唯一。
+    // A suffix can hit another icon's real name; probe until it is globally unique.
+    while (slots[slot]) {
+      suffix++;
+      name = `${base}${suffix}`;
+      slot = slotFor(name.toLowerCase());
+    }
+    slots[slot] = row + 1;
+    names[row] = name;
+    const path = sorted[row].path;
     entries.append({
       id: `${prefix}${name}`,
       name,

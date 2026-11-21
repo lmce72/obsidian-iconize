@@ -6,15 +6,31 @@ import { buildPositionField } from '../state';
 import { IconInTextWidget } from './icon-in-text';
 import { IconInLinkWidget } from './icon-in-link';
 
-vi.mock('obsidian', () => ({ sanitizeHTMLToDom: (markup: string) => {
-  const fragment = document.createDocumentFragment();
-  fragment.append(...Array.from(new DOMParser().parseFromString(markup, 'text/html').body.childNodes));
-  return fragment;
-} }));
-vi.mock('@codemirror/language', () => ({ syntaxTree: () => ({ iterate() {} }), tokenClassNodeProp: {} }));
-vi.mock('@app/lib/icon', () => ({ default: { getIconByName: vi.fn(() => null) } }));
-vi.mock('@app/emoji', () => ({ default: { isEmoji: () => false, getRegex: () => /(?!) /g } }));
-vi.mock('@app/lib/util/text', () => ({ calculateFontTextSize: () => 16, calculateHeaderSize: () => 24 }));
+vi.mock('obsidian', () => ({
+  sanitizeHTMLToDom: (markup: string) => {
+    const fragment = document.createDocumentFragment();
+    fragment.append(
+      ...Array.from(
+        new DOMParser().parseFromString(markup, 'text/html').body.childNodes,
+      ),
+    );
+    return fragment;
+  },
+}));
+vi.mock('@codemirror/language', () => ({
+  syntaxTree: () => ({ iterate() {} }),
+  tokenClassNodeProp: {},
+}));
+vi.mock('@app/lib/icon', () => ({
+  default: { getIconByName: vi.fn(() => null) },
+}));
+vi.mock('@app/emoji', () => ({
+  default: { isEmoji: () => false, getRegex: () => /(?!) /g },
+}));
+vi.mock('@app/lib/util/text', () => ({
+  calculateFontTextSize: () => 16,
+  calculateHeaderSize: () => 24,
+}));
 
 function fixture() {
   const fillElement = vi.fn();
@@ -23,11 +39,17 @@ function fixture() {
   const plugin = {
     getSettings: () => ({ iconIdentifier: ':', iconColor: undefined }),
     getIconColor: () => undefined,
-    iconResolver: { find: (id: string) => id.toLowerCase() === 'paone' ? { entry: { id: 'PaOne' } } : undefined },
+    iconResolver: {
+      find: (id: string) =>
+        id.toLowerCase() === 'paone' ? { entry: { id: 'PaOne' } } : undefined,
+    },
     inlineIconLoader: { fillElement, releaseElement, requestIcon },
     app: { workspace: { iterateAllLeaves: vi.fn() } },
   } as unknown as IconizePlugin;
-  const view = { dom: document.createElement('div'), state: EditorState.create({ doc: 'heading\n:PaOne:\nend' }) } as unknown as EditorView;
+  const view = {
+    dom: document.createElement('div'),
+    state: EditorState.create({ doc: 'heading\n:PaOne:\nend' }),
+  } as unknown as EditorView;
   return { plugin, view, fillElement, releaseElement, requestIcon };
 }
 
@@ -35,9 +57,14 @@ describe('lazy Live Preview widgets', () => {
   it('keeps indexed shortcodes in the position field before SVG resolution', () => {
     const f = fixture();
     const field = buildPositionField(f.plugin);
-    const state = EditorState.create({ doc: 'heading\n:PaOne:\nend', extensions: [field] });
+    const state = EditorState.create({
+      doc: 'heading\n:PaOne:\nend',
+      extensions: [field],
+    });
     const positions: Array<[number, number, string]> = [];
-    state.field(field).between(0, state.doc.length, (from, to, value) => { positions.push([from, to, value.iconId]); });
+    state.field(field).between(0, state.doc.length, (from, to, value) => {
+      positions.push([from, to, value.iconId]);
+    });
     expect(positions).toEqual([[8, 15, 'PaOne']]);
     expect(f.requestIcon).not.toHaveBeenCalled();
   });
@@ -47,7 +74,9 @@ describe('lazy Live Preview widgets', () => {
     const widget = new IconInTextWidget(f.plugin, 'PaOne');
     widget.setPosition(8, 15);
     const element = widget.toDOM(f.view);
-    expect(f.fillElement).toHaveBeenCalledWith(element, 'PaOne', { fontSize: 16 });
+    expect(f.fillElement).toHaveBeenCalledWith(element, 'PaOne', {
+      fontSize: 16,
+    });
     expect(element.getAttribute('data-icon')).toBe('PaOne');
     expect(element.getAttribute('data-iconize-from')).toBe('8');
     expect(element.classList.contains('cm-iconize-icon')).toBe(true);
@@ -60,7 +89,9 @@ describe('lazy Live Preview widgets', () => {
     const f = fixture();
     const widget = new IconInLinkWidget(f.plugin, 'PaOne', 'Target.md', null);
     const element = widget.toDOM(f.view);
-    expect(f.fillElement).toHaveBeenCalledWith(element, 'PaOne', { fontSize: 16 });
+    expect(f.fillElement).toHaveBeenCalledWith(element, 'PaOne', {
+      fontSize: 16,
+    });
     expect(element.classList.contains('iconize-icon-in-link')).toBe(true);
     expect(element.getAttribute('title')).toBe('PaOne');
     widget.destroy(element);

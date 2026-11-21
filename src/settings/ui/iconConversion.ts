@@ -50,7 +50,7 @@ export default class IconConversionSetting extends IconFolderSetting {
     new Setting(this.containerEl)
       .setName('嵌入格式 / Embed format')
       .setDesc(
-        '默认写入 Base64 自包含图片；可改用可读 SVG 标签或文件引用。部分平台会过滤内嵌图片或 SVG；分享文件引用时需携带 Iconize SVG 文件夹。',
+        '默认写入 Base64 自包含图片；文档命令执行前会先选择本次格式。SVG 标签适合留在 Obsidian 或导出 PDF；文件引用适合 GitHub、博客等需要一起发布 Iconize SVG 文件夹的场景；Base64 适合单文件发送，但部分发布平台会过滤。发布后图标空白时，换一种格式并先在目标平台预览；分享文件引用时需携带 Iconize SVG 文件夹。',
       )
       .addDropdown((dropdown) =>
         dropdown

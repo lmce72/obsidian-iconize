@@ -68,6 +68,10 @@ declare module 'obsidian' {
   }
 
   interface App {
+    /** 命令注册表未在公开类型中暴露 / The command registry is not in the public types. */
+    commands: {
+      executeCommandById(id: string): boolean;
+    };
     plugins: {
       enabledPlugins: Set<string>;
       plugins: {

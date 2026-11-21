@@ -53,6 +53,7 @@ import {
   equalConfig,
   mergeConfig,
   parseConfig,
+  parseConfigLenient,
   stampConfigChanges,
   rebaseConfig,
 } from './lib/config-merge';
@@ -75,6 +76,7 @@ import { getNormalizedName } from './icon-pack-manager/util';
 import { IconConversion } from './lib/icon-conversion';
 import { findIconTags } from './lib/icon-tags';
 import IconConverterModal from './ui/icon-converter-modal';
+import IconEmbedFormatModal from './ui/icon-embed-format-modal';
 import ConfigRecoveryModal from './ui/config-recovery-modal';
 import NotebookNavigatorIntegration from './integrations/notebook-navigator';
 // ===== PATCHED: 按需加载系统 / Lazy loading system =====
@@ -96,6 +98,9 @@ export interface FolderIconObject {
   iconName: string | null;
   iconColor?: string;
 }
+
+/** 默认配置路径 / Default configuration path. */
+const DEFAULT_CONFIG_PATH = '.obsidian/plugins/obsidian-icon-folder/data.json';
 
 export default class IconizePlugin extends Plugin {
   public conversion = new IconConversion(this);
@@ -151,15 +156,22 @@ export default class IconizePlugin extends Plugin {
   } | null = null;
   private configHistorySequence = 0;
   private configRecoveryPending = false;
-  private configPath = '.obsidian/plugins/obsidian-icon-folder/data.json';
+  private configPath = DEFAULT_CONFIG_PATH;
   /**
    * 配置读取的结果 / Outcome of the last config read.
    *
-   * `failed` 时禁止写回，避免用默认值覆盖用户真实的配置。
-   * While `failed`, saving is refused so defaults never overwrite the user's config.
+   * `failed` 只用于暂时读不到（I/O / 同步占用），此时写回会用默认值覆盖真实配置。
+   * 内容损坏会走 `recovered`：先备份原文件，再保留可用的图标记录与设置，允许保存。
+   *
+   * `failed` is reserved for transient I/O (sync in flight, permissions), where writing
+   * would replace the real config with defaults. Broken content becomes `recovered`: the
+   * original is backed up, usable records/settings are kept, and saving is allowed.
    */
-  private configLoadState: 'ok' | 'missing' | 'failed' = 'missing';
+  private configLoadState: 'ok' | 'missing' | 'recovered' | 'failed' =
+    'missing';
   private configLoadError = '';
+  private configRecoveredWarnings: string[] = [];
+  private configCorruptBackup: string | null = null;
   private configMaintenance = false;
   private configMaintenanceEpoch = 0;
   // 标题图标的请求序号登记已下沉到 `lib/icon-title`（元素身份归那个模块管）：
@@ -214,7 +226,11 @@ export default class IconizePlugin extends Plugin {
         try {
           this.settingsUI?.openManager();
         } catch (error) {
-          logger.error('Could not open the icon pack manager', undefined, error);
+          logger.error(
+            'Could not open the icon pack manager',
+            undefined,
+            error,
+          );
           new Notice('Iconize：无法打开图标包管理。');
         }
       },
@@ -282,15 +298,26 @@ export default class IconizePlugin extends Plugin {
         this.setConfigPath(savedConfigPath);
         await this.loadIconFolderData();
       } else {
-        // Never fall back to an old bootstrap copy and later overwrite its pointer.
+        // 插件从别的库搬过来时，指针可能指向旧库的路径。不要因此永久禁止保存：
+        // 保留刚读到的配置，下一次保存直接在该路径创建文件；用户也可以在
+        // “配置诊断与恢复”中一键改用默认路径。
+        //
+        // A plugin moved from another vault can point at a path that no longer exists.
+        // Never dead-end the save: keep the configuration just loaded, create the target
+        // on the next save, and offer a one-click reset to the default path.
         this.setConfigPath(savedConfigPath);
-        this.configLoadState = 'failed';
+        this.configLoadState = 'missing';
+        this.configLoadError = `记录的配置路径 ${savedConfigPath} 不存在，保存时会创建`;
+        this.configRecoveredWarnings = [];
+        this.configCorruptBackup = null;
+        this._lastSavedConfig = null;
+        this.configRecoveryPending = true;
         console.warn(
-          `[${config.PLUGIN_NAME}] Configured config file '${savedConfigPath}' is unavailable; saving is disabled`,
+          `[${config.PLUGIN_NAME}] Configured config file '${savedConfigPath}' is missing; it will be created on the next save`,
         );
         new Notice(
-          `Iconize：配置文件 ${savedConfigPath} 暂不可用，已停止保存，避免退回旧配置。`,
-          0,
+          `Iconize：记录的配置路径 ${savedConfigPath} 不存在。将保留当前设置并在保存时创建；如不需要该路径，可在“配置诊断与恢复”中改用默认路径。`,
+          10000,
         );
       }
     }
@@ -358,16 +385,12 @@ export default class IconizePlugin extends Plugin {
     this.addCommand({
       id: 'embed-icons-in-note',
       name: '将文档内的所有 Iconize 标签嵌入实际图标',
-      editorCallback: (editor) => {
-        void this.conversion.convertEditor(editor);
-      },
+      editorCallback: (editor) => this.openEmbedFormatModal('note', editor),
     });
     this.addCommand({
       id: 'embed-icons-in-vault',
       name: '将所有带 Iconize 标签的文档嵌入实际图标',
-      callback: () => {
-        void this.conversion.convertVault();
-      },
+      callback: () => this.openEmbedFormatModal('vault'),
     });
     this.addCommand({
       id: 'convert-icon-tags-to-svg',
@@ -421,8 +444,21 @@ export default class IconizePlugin extends Plugin {
                 : tags.length === 1
                   ? tags[0]
                   : undefined;
-            if (tag) void this.conversion.convertEditor(view.editor, tag);
-            else this.openIconOccurrenceMenu(view.editor, id, event);
+            if (tag) {
+              new IconEmbedFormatModal(this, {
+                title: '转换此图标',
+                description: '选择写入当前文档的格式。只替换这一处标签。',
+                confirmText: '转换',
+                onConfirm: (format) => {
+                  void this.conversion.convertEditor(
+                    view.editor,
+                    tag,
+                    false,
+                    format,
+                  );
+                },
+              }).open();
+            } else this.openIconOccurrenceMenu(view.editor, id, event);
           }),
       );
       menu.addItem((item) =>
@@ -1910,6 +1946,61 @@ export default class IconizePlugin extends Plugin {
     else menu.showAtPosition({ x: 100, y: 100 });
   }
 
+  /**
+   * 转换前先选择嵌入格式 / Asks for the embed format before conversion.
+   *
+   * 格式选择不只服务设置页：整篇文档/整个 Vault 的命令需要针对当前渲染上下文
+   * 选择，Base64 在沙箱预览或 srcdoc 上下文中可能被 CSP 拦截。
+   *
+   * Format choice is not only a settings concern: document and vault commands need it
+   * per run because Base64 may be blocked by CSP in sandboxed preview or srcdoc contexts.
+   */
+  private openEmbedFormatModal(
+    target: 'note' | 'vault',
+    editor?: Editor,
+  ): void {
+    const fileCount = this.app.vault.getMarkdownFiles().length;
+    if (target === 'note' && !editor) {
+      new Notice('Iconize：请先打开一个 Markdown 文档。');
+      return;
+    }
+    new IconEmbedFormatModal(this, {
+      title: target === 'note' ? '嵌入当前文档图标' : '嵌入整个 Vault 图标',
+      description:
+        target === 'note'
+          ? '转换当前文档正文中的 Iconize 标签；YAML、代码、链接目标与转义文本保持不变。'
+          : `将扫描 ${fileCount} 篇 Markdown 文档；打开的文档可撤销，后台文档直接写入。建议先备份或在一篇笔记上预览。`,
+      warning:
+        target === 'vault'
+          ? '整个 Vault 转换不是一次可撤销的编辑操作。'
+          : undefined,
+      confirmText:
+        target === 'note' ? '转换当前文档' : `转换 ${fileCount} 篇文档`,
+      onConfirm: (format, remember) => {
+        if (remember) {
+          this.getSettings().iconEmbedFormat = format;
+          void this.saveIconFolderData();
+        }
+        if (target === 'note') {
+          // 弹窗持有焦点后 getActiveViewOfType(MarkdownView) 会返回 null；
+          // 使用命令回调捕获的 editor，避免“没有打开的文档”误报。
+          //
+          // With the modal focused, getActiveViewOfType(MarkdownView) returns null;
+          // use the editor captured by the command callback instead.
+          if (editor)
+            void this.conversion.convertEditor(
+              editor,
+              undefined,
+              false,
+              format,
+            );
+        } else {
+          void this.conversion.convertVault(format);
+        }
+      },
+    }).open();
+  }
+
   private addInlineConversionMenu(menu: Menu, editor: Editor): void {
     const offset = editor.posToOffset(editor.getCursor());
     const tag = findIconTags(
@@ -1922,7 +2013,16 @@ export default class IconizePlugin extends Plugin {
         .setTitle('转换此 Iconize 图标 / Convert icon')
         .setIcon('image')
         .onClick(() => {
-          void this.conversion.convertEditor(editor, tag);
+          // 单图标转换也允许选格式，避免用户在设置页来回切换。
+          // Single-icon conversion also picks a format, so no settings detour is needed.
+          new IconEmbedFormatModal(this, {
+            title: '转换此 Iconize 图标',
+            description: '选择写入当前文档的格式。只替换这一个标签。',
+            confirmText: '转换',
+            onConfirm: (format) => {
+              void this.conversion.convertEditor(editor, tag, false, format);
+            },
+          }).open();
         }),
     );
   }
@@ -1943,7 +2043,14 @@ export default class IconizePlugin extends Plugin {
         item
           .setTitle(`第 ${line + 1} 行：${editor.getLine(line).slice(0, 80)}`)
           .onClick(() => {
-            void this.conversion.convertEditor(editor, tag);
+            new IconEmbedFormatModal(this, {
+              title: '转换此 Iconize 图标',
+              description: '选择写入当前文档的格式。只替换这一处标签。',
+              confirmText: '转换',
+              onConfirm: (format) => {
+                void this.conversion.convertEditor(editor, tag, false, format);
+              },
+            }).open();
           }),
       );
     }
@@ -1953,22 +2060,111 @@ export default class IconizePlugin extends Plugin {
   public getConfigurationStatus(): string {
     const state =
       this.configLoadState === 'failed'
-        ? '读取失败，已保护原文件并停止保存'
+        ? '读取失败（暂时无法访问），已停止保存以保护原文件'
         : this.configLoadState === 'missing'
-          ? '配置文件尚未创建'
-          : '配置读取正常';
-    return `${state}。路径：${this.getConfigPath()}${this.configLoadError ? `；原因：${this.configLoadError}` : ''}${this.configLastSaveError ? `；最近保存失败：${this.configLastSaveError.message}` : ''}`;
+          ? '配置尚未创建，当前使用默认设置；保存时会自动创建'
+          : this.configLoadState === 'recovered'
+            ? '配置内容损坏，已备份原文件并保留可用记录；保存会写入新配置'
+            : '配置读取正常';
+    const backup = this.configCorruptBackup
+      ? `；原文件备份：${this.configCorruptBackup}`
+      : '';
+    const warnings = this.configRecoveredWarnings.length
+      ? `；${this.configRecoveredWarnings.slice(0, 3).join('；')}${
+          this.configRecoveredWarnings.length > 3
+            ? ` 等 ${this.configRecoveredWarnings.length} 项`
+            : ''
+        }`
+      : '';
+    return `${state}。路径：${this.getConfigPath()}${
+      this.configLoadError ? `；原因：${this.configLoadError}` : ''
+    }${backup}${warnings}${
+      this.configLastSaveError
+        ? `；最近保存失败：${this.configLastSaveError.message}`
+        : ''
+    }`;
+  }
+
+  /** 配置尚未创建时的默认路径 / Default path when no config exists yet. */
+  public getDefaultConfigPath(): string {
+    return DEFAULT_CONFIG_PATH;
+  }
+
+  /**
+   * 明确创建/保存当前配置 / Explicitly creates or saves the current config.
+   *
+   * 用户点下按钮即表示接受覆盖风险（损坏内容已先备份）。这里临时解除 `failed`
+   * 的保存禁令，保存失败再恢复原状态并显示原因。
+   *
+   * The click is the user's decision to accept the overwrite (damaged content is backed up
+   * first). The `failed` save ban is lifted temporarily; a failed write restores the state
+   * and reports the reason.
+   */
+  public async createOrSaveConfig(): Promise<boolean> {
+    const previous = this.configLoadState;
+    if (this.configLoadState === 'failed') this.configLoadState = 'ok';
+    this._lastSavedConfig = null;
+    this.configRecoveryPending = false;
+    try {
+      await this.saveIconFolderData();
+      if (this.configSaveSucceeded) {
+        this.configLoadState = 'ok';
+        this.configLoadError = '';
+        this.configRecoveredWarnings = [];
+        return true;
+      }
+      this.configLoadState = previous;
+      return false;
+    } catch {
+      this.configLoadState = previous;
+      return false;
+    }
+  }
+
+  /**
+   * 改用默认配置路径 / Falls back to the default config path.
+   *
+   * 用于「插件从别的库搬过来、记录的路径不存在」：不要求用户手动清空字段。
+   * For a plugin moved from another vault whose recorded path no longer exists; the user
+   * does not have to clear the field by hand.
+   */
+  public async resetConfigPathToDefault(): Promise<void> {
+    this.setConfigPath(DEFAULT_CONFIG_PATH);
+    this.getSettings().configFilePath = DEFAULT_CONFIG_PATH;
+    await this.loadIconFolderData();
+    if (this.configLoadState === 'ok') {
+      await this.saveIconFolderData();
+      return;
+    }
+    if (
+      this.configLoadState === 'missing' ||
+      this.configLoadState === 'recovered'
+    ) {
+      if (!(await this.createOrSaveConfig()))
+        throw new Error('配置未能写入默认路径，请检查文件权限或同步状态');
+    }
   }
 
   public async retryConfiguration(): Promise<void> {
-    // 重试前保留尚未保存的内存状态。 / Preserve unsaved in-memory edits before retrying.
+    if (this.configMaintenance) {
+      new Notice('Iconize：配置恢复正在进行，请稍候。');
+      return;
+    }
+    // 缺失/损坏/暂时不可读时没有可信的旧配置可保全，重试只重新读取；
+    // 不走历史快照和维护队列，避免空配置触发无意义的写入与重入。
+    //
+    // For missing/damaged/unreadable configs there is no trustworthy snapshot to preserve;
+    // retry only re-reads. This also avoids pointless history writes and re-entrancy.
+    if (this.configLoadState !== 'ok') {
+      await this.loadIconFolderData();
+      return;
+    }
     await this.withConfigurationMaintenance('before-manual-retry', () =>
       this.loadIconFolderData(),
     );
     if (this.configLoadState === 'ok') {
       IconCache.getInstance().clear();
       this.handleChangeLayout();
-      new Notice('Iconize：配置已重新读取，请重新加载插件以应用全部设置。');
     }
   }
 
@@ -2075,7 +2271,11 @@ export default class IconizePlugin extends Plugin {
         clearTimeout(this.configRefreshTimer);
         this.configRefreshTimer = null;
       }
-      if (this.configSaveTask) await this.configSaveTask;
+      if (this.configSaveTask)
+        await Promise.race([
+          this.configSaveTask,
+          new Promise<void>((resolve) => window.setTimeout(resolve, 5000)),
+        ]);
       const history = await this.preserveConfigHistory(reason);
       await action(history);
     } finally {
@@ -2199,60 +2399,140 @@ export default class IconizePlugin extends Plugin {
     }
   }
 
-  async loadIconFolderData(): Promise<void> {
+  /** 把读到的配置放进运行期状态 / Applies loaded configuration to runtime state. */
+  private applyLoadedConfig(data: ConfigData | null): void {
+    const next = data ? cloneConfig(data) : {};
+    if (next.settings && typeof next.settings === 'object') {
+      const settings = next.settings as Record<string, unknown>;
+      for (const [key, fallback] of Object.entries(DEFAULT_SETTINGS)) {
+        if (settings[key] === undefined) settings[key] = cloneConfig(fallback);
+      }
+    }
+    this.configBaseline = cloneConfig(next);
+    this.data = Object.assign(
+      { settings: cloneConfig(DEFAULT_SETTINGS) },
+      {},
+      next,
+    ) as Record<
+      string,
+      string | boolean | IconFolderSettings | FolderIconObject
+    >;
+    this.configVersionBaseline = cloneConfig(this.data);
+  }
+
+  /**
+   * 暂时读不到配置：只停止写回，不动原文件。
+   * Transient read failure: stop writing; never touch the original file.
+   */
+  private failConfigLoad(error: unknown, stage: string): void {
+    console.error(`[iconize] ${stage}`, this.getConfigPath(), error);
+    this.configLoadState = 'failed';
+    this.configLoadError = `${stage}：${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    this.configRecoveredWarnings = [];
+    this.configCorruptBackup = null;
+    this.applyLoadedConfig(null);
+    this._lastSavedConfig = JSON.stringify(this.data, null, 2);
+    new Notice(
+      `Iconize：${this.configLoadError}。已停止保存，避免默认值覆盖原配置。请在“配置诊断与恢复”中重试或改用默认路径。`,
+      0,
+    );
+  }
+
+  /**
+   * 备份损坏的配置原文 / Backs up the original bytes of a damaged config.
+   *
+   * 返回 `null` 表示备份失败；此时不自动保存，必须由用户明确点击保存。
+   * `null` means the backup failed; automatic saving stays off until the user explicitly
+   * chooses to save.
+   */
+  private async backupCorruptConfig(raw: string): Promise<string | null> {
     try {
-      const configPath = this.getConfigPath();
-      const exists = await this.app.vault.adapter.exists(configPath);
-      let data: Record<string, unknown> | null = null;
-      if (exists) {
-        const raw = await this.app.vault.adapter.read(configPath);
-        data = parseConfig(raw);
-        this.configLoadState = 'ok';
-      } else {
-        this.configLoadState = 'missing';
-      }
-      this.configBaseline = cloneConfig(data ?? {});
-      if (data) {
-        Object.entries(DEFAULT_SETTINGS).forEach(([k, v]) => {
-          if (
-            (data as { settings?: Record<string, unknown> }).settings?.[k] ===
-            undefined
-          ) {
-            (data as { settings: Record<string, unknown> }).settings[k] =
-              cloneConfig(v);
-          }
-        });
-      }
-      this.data = Object.assign(
-        { settings: cloneConfig(DEFAULT_SETTINGS) },
-        {},
-        data ?? {},
-      ) as Record<
-        string,
-        string | boolean | IconFolderSettings | FolderIconObject
-      >;
-      this._lastSavedConfig = JSON.stringify(this.data, null, 2);
-      this.configLoadError = '';
-      this.configVersionBaseline = cloneConfig(this.data);
+      const adapter = this.app.vault.adapter;
+      const base = `${this.getConfigPath()}.corrupt-${Date.now()}`;
+      let path = base;
+      let counter = 1;
+      while (await adapter.exists(path)) path = `${base}-${counter++}`;
+      await adapter.write(path, raw);
+      return path;
     } catch (error) {
-      console.error(
-        '[iconize] Failed to load config from',
-        this.getConfigPath(),
-        error,
-      );
-      // 标记读取失败。此时内存里是默认值，一旦写回就会把用户真实的配置整个抹掉——
-      // 同步正在写入、移动端存储抖动、JSON 写到一半，都可能触发。
-      //
-      // Record the failure. The in-memory data is defaults at this point, and writing it
-      // back would erase the user's real config — a sync write in flight, a storage hiccup
-      // on mobile, or a half-written JSON file are all enough to trigger it.
-      this.configLoadState = 'failed';
-      this.configLoadError =
-        error instanceof Error ? error.message : 'Unknown configuration error';
-      this.data = { settings: cloneConfig(DEFAULT_SETTINGS) };
+      console.error('[iconize] Could not back up damaged config:', error);
+      return null;
+    }
+  }
+
+  async loadIconFolderData(): Promise<void> {
+    const configPath = this.getConfigPath();
+    let exists = false;
+    try {
+      exists = await this.app.vault.adapter.exists(configPath);
+    } catch (error) {
+      this.failConfigLoad(error, '无法访问配置路径');
+      return;
+    }
+    if (!exists) {
+      this.configLoadState = 'missing';
+      this.configLoadError = '';
+      this.configRecoveredWarnings = [];
+      this.configCorruptBackup = null;
+      this.applyLoadedConfig(null);
+      this._lastSavedConfig = JSON.stringify(this.data, null, 2);
+      return;
+    }
+
+    let raw: string;
+    try {
+      raw = await this.app.vault.adapter.read(configPath);
+    } catch (error) {
+      this.failConfigLoad(error, '无法读取配置文件');
+      return;
+    }
+
+    try {
+      const data = parseConfig(raw);
+      this.configLoadState = 'ok';
+      this.configLoadError = '';
+      this.configRecoveredWarnings = [];
+      this.configCorruptBackup = null;
+      this.applyLoadedConfig(data);
+      this._lastSavedConfig = JSON.stringify(this.data, null, 2);
+      return;
+    } catch {
+      // Content is damaged. Keep every usable record below instead of discarding it.
+    }
+
+    try {
+      const lenient = parseConfigLenient(raw);
+      const backup = await this.backupCorruptConfig(raw);
+      this.configLoadState = 'recovered';
+      this.configRecoveredWarnings = lenient.warnings;
+      this.configCorruptBackup = backup;
+      this.configLoadError = lenient.warnings[0] ?? '配置内容不完整';
+      this.applyLoadedConfig(lenient.data);
+      this._lastSavedConfig = null;
+      this.configRecoveryPending = backup !== null;
       new Notice(
-        `Iconize：配置读取失败（${this.configLoadError}）。已停止保存。请在设置中打开“配置诊断与恢复”，或运行同名命令。`,
-        0,
+        `Iconize：配置文件内容有问题，已${
+          backup ? `备份到 ${backup}，` : ''
+        }保留可用的图标和规则；保存时会写入新配置。`,
+        10000,
+      );
+    } catch {
+      // JSON syntax is broken; no field can be trusted, but the original is still backed up.
+      const backup = await this.backupCorruptConfig(raw);
+      this.configLoadState = 'recovered';
+      this.configRecoveredWarnings = ['配置文件 JSON 无法解析，已改用默认设置'];
+      this.configCorruptBackup = backup;
+      this.configLoadError = '配置文件 JSON 无法解析';
+      this.applyLoadedConfig(null);
+      this._lastSavedConfig = null;
+      this.configRecoveryPending = backup !== null;
+      new Notice(
+        `Iconize：配置文件 JSON 无法解析，已${
+          backup ? `备份到 ${backup}，` : ''
+        }改用默认设置；保存时会写入新配置。`,
+        10000,
       );
     }
   }
@@ -2301,7 +2581,15 @@ export default class IconizePlugin extends Plugin {
       return { raw: null, data: {} };
     }
     const raw = await adapter.read(path);
-    return { raw, data: parseConfig(raw) };
+    try {
+      return { raw, data: parseConfig(raw) };
+    } catch (error) {
+      // 已恢复的配置可能仍指向损坏原文；保存时以空基线重建，原文已备份。
+      // A recovered config may still sit next to damaged bytes; rebuild from an empty
+      // baseline on save. The original was backed up before recovery.
+      if (this.configLoadState === 'recovered') return { raw, data: {} };
+      throw error;
+    }
   }
 
   private flushConfigSave(): Promise<void> {
@@ -2459,6 +2747,9 @@ export default class IconizePlugin extends Plugin {
       this._lastSavedConfig = serialized;
       this.configSaveSucceeded = true;
       this.configLastSaveError = null;
+      this.configLoadError = '';
+      this.configRecoveredWarnings = [];
+      this.configCorruptBackup = null;
       this.configRecoveryPending = false;
       await this.updateConfigCheckpoint(merged);
       this.refreshConfiguredIcons(local);

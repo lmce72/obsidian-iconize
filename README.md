@@ -50,6 +50,22 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 
 ## Enhanced icon workflows
 
+Version 2.15.1 fixes the configuration dead end and the recovery dialog: a missing config is treated as a normal fresh install, a damaged config is backed up and its usable icon records/settings are recovered, a config path copied from another vault is recreated (or can be reset to the default), and recovery actions close the dialog before doing their I/O and report through a notice. Reset/restore now opens a reload prompt because the new path cannot be hot-swapped. The diagnostics also show copyable sync-exclusion rules for `.iconize` (Syncthing, Git, Obsidian Sync, Remotely Save). See [configuration, recovery and sync exclusions](docs/good-to-know/sync-config.md).
+
+Version 2.15.0 imports icon packs from ZIP or repository archives, tar.gz and npm tarballs, Iconify JSON, SVG sprites, single SVG files, JavaScript icon modules such as `@heroicons/react`, and TTF/OTF/WOFF fonts with optional CSS. The importer recognizes marker files and directories (`icons`, `svgs`, `src`, `symbol`, `createElement("path")`, `icons` + `prefix`), keeps only the icon set, and drops documentation screenshots, test fixtures and duplicate sprite sheets. The pack name or Iconify prefix becomes the Iconize prefix; equal icon names in different packs stay independent. WOFF2 is not supported because the bundled font parser cannot decode it. See [multi-format import and verification notes](docs/development/2026-11-21-multi-format-import.md).
+
+The document commands (embed all tags in the current note, or in the whole vault) now ask for the output format before converting, with the same table shown in the dialog. The single-icon context-menu conversion uses the same picker. Automatic conversion after idle typing keeps using the saved default. See [embed formats for PDF, GitHub and blogs](docs/development/2026-11-21-document-embed-formats.md).
+
+| Format | Best for | GitHub | Personal blog | Note size |
+|---|---|---|---|---|
+| `<svg>` element | Reading in Obsidian, PDF/print export, or HTML-capable notebooks; icons follow the text color. | Usually removed by GitHub's HTML sanitizer. | Depends on the generator/theme allowing raw HTML. | Largest. |
+| Base64 `<img>` | Sending one note without attachments to a platform that allows `data:` images. | Often filtered; check the preview before publishing. | Depends on the site's image policy; check the preview. | About +33%. |
+| `Iconize SVG/` file reference | GitHub repos or blogs where you can publish the icon folder next to the note. | Works after committing the folder and fixing relative paths. | Works after copying the SVGs into the site's static folder and fixing paths. | Smallest. |
+
+For GitHub and most blogs, a normal image file with a relative path is more reliable than embedding the icon inside Markdown. If icons appear blank after publishing or the browser console reports a security error, the platform blocked inline SVG or a `data:` image; switch to the file-reference format, publish the `Iconize SVG/` folder, and check the target preview.
+
+The document converter can also choose the embed format for a single run: a readable `<svg>` element, a self-contained Base64 image, or a reference to a file in `Iconize SVG/`. Base64 is produced locally with the browser's character encoder only when that format is selected; it is not used to hide code or credentials, and its only purpose is to carry the icon inside the Markdown file. Importing packs reads files from the user's disk and makes no network request.
+
 Version 2.14.8 adds a color-aware icon picker, portable document embedding, delayed automatic conversion, configuration recovery, and cooperative search for large icon libraries. The default embed format is a self-contained Base64 SVG image. See [usage and validation notes](docs/development/2026-11-18-icon-workflows.md). Requires Obsidian 1.7.2 or later.
 
 Version 2.14.11 moves icon-pack management into a settings subpage: a chevron row opens it in place, with a back row returning to the settings page.

@@ -7,6 +7,14 @@ export enum IconInTitlePosition {
 
 export type LucideIconPackType = 'none' | 'custom' | 'native';
 
+/**
+ * 文档图标嵌入格式 / How icons are written into a document.
+ *
+ * `svg`：原始 SVG 标签；`data`：Base64 自包含图片；`file`：Iconize SVG 资源引用。
+ * `svg`: raw SVG element; `data`: self-contained Base64 image; `file`: Iconize SVG asset.
+ */
+export type IconEmbedFormat = 'svg' | 'data' | 'file';
+
 export interface ExtraMarginSettings {
   /**
    * Controls the extra margin on the top of the icon.
@@ -70,7 +78,7 @@ export interface IconFolderSettings {
   /** 停止输入后的等待秒数 / Idle delay in seconds. */
   autoConvertDelay: number;
   /** 可移植图标输出格式 / Portable icon output format. */
-  iconEmbedFormat: 'svg' | 'data' | 'file';
+  iconEmbedFormat: IconEmbedFormat;
   /**
    * The version of the settings which is used for migrations. This number should be
    * bumped up for every migration.

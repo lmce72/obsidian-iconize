@@ -519,3 +519,56 @@
 .iconize-settings-subpage {
   min-inline-size: 0;
 }
+
+/* 嵌入格式选择弹窗 / Embed format picker */
+.iconize-embed-formats {
+  inline-size: 100%;
+  border-collapse: collapse;
+  margin-block: 12px 8px;
+  font-size: var(--font-ui-small);
+}
+.iconize-embed-formats th,
+.iconize-embed-formats td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 6px 8px;
+  text-align: start;
+  vertical-align: top;
+}
+.iconize-embed-formats thead th {
+  background-color: var(--background-secondary);
+  font-weight: var(--font-semibold);
+}
+.iconize-embed-formats tbody th {
+  white-space: nowrap;
+  font-weight: var(--font-medium);
+}
+.iconize-embed-warning {
+  color: var(--text-warning);
+}
+.iconize-embed-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+/* 配置诊断 / Configuration recovery */
+.iconize-config-status {
+  overflow-wrap: anywhere;
+}
+.iconize-sync-exclusions {
+  margin-block-start: 12px;
+}
+.iconize-sync-exclusions summary {
+  cursor: pointer;
+  font-weight: var(--font-medium);
+}
+.iconize-sync-rules {
+  max-inline-size: 100%;
+  overflow-x: auto;
+  padding: 8px;
+  border-radius: var(--radius-s);
+  background-color: var(--background-secondary);
+}
+.iconize-sync-rules code {
+  white-space: pre;
+  font-size: var(--font-ui-smaller);
+}

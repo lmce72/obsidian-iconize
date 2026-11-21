@@ -8,6 +8,7 @@ import {
   sanitizeHTMLToDom,
 } from 'obsidian';
 import type IconizePlugin from '@app/main';
+import type { IconEmbedFormat } from '@app/settings/data';
 import icon from './icon';
 import { findIconTags, replaceIconTags, IconTag } from './icon-tags';
 
@@ -60,18 +61,24 @@ export class IconConversion {
     asSvg: boolean,
     only?: IconTag,
     color?: string,
+    formatOverride?: IconEmbedFormat,
   ): Promise<{ tags: IconTag[]; values: Map<string, string> }> {
     const tags = only
       ? [only]
       : findIconTags(text, this.plugin.getSettings().iconIdentifier);
     const values = new Map<string, string>();
+    // 转换器可以针对单次输出选择格式；未指定时沿用设置。
+    // The converter may pick a format for one run; otherwise the setting applies.
+    const format: IconEmbedFormat =
+      formatOverride ??
+      (asSvg ? 'svg' : this.plugin.getSettings().iconEmbedFormat);
     for (const id of new Set(tags.map((tag) => tag.id))) {
       if (this.stopped) break;
       const markup = await this.getSvg(id, color);
       if (!markup) continue;
-      if (asSvg || this.plugin.getSettings().iconEmbedFormat === 'svg') {
+      if (format === 'svg') {
         values.set(id, markup);
-      } else if (this.plugin.getSettings().iconEmbedFormat !== 'file') {
+      } else if (format === 'data') {
         // 自包含图片无需插件或附件，部分平台会限制 data URI。 / Self-contained image; some platforms restrict data URIs.
         const bytes = new TextEncoder().encode(
           markup.replace(/currentColor/g, '#808080'),
@@ -118,6 +125,7 @@ export class IconConversion {
     editor: Editor,
     only?: IconTag,
     quiet = false,
+    format?: IconEmbedFormat,
   ): Promise<number | null> {
     const source = editor.getValue();
     if (
@@ -133,7 +141,13 @@ export class IconConversion {
     const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
     const path = view?.editor === editor ? view.file?.path : undefined;
     try {
-      const { tags, values } = await this.replacements(source, false, only);
+      const { tags, values } = await this.replacements(
+        source,
+        false,
+        only,
+        undefined,
+        format,
+      );
       if (
         this.stopped ||
         editor.getValue() !== source ||
@@ -197,7 +211,7 @@ export class IconConversion {
     this.cancelPending();
   }
 
-  async convertVault(): Promise<void> {
+  async convertVault(format?: IconEmbedFormat): Promise<void> {
     if (this.batchRunning) return;
     this.batchRunning = true;
     let changed = 0;
@@ -209,7 +223,13 @@ export class IconConversion {
         if (this.stopped) break;
         try {
           const source = await this.plugin.app.vault.read(file);
-          const { tags, values } = await this.replacements(source, false);
+          const { tags, values } = await this.replacements(
+            source,
+            false,
+            undefined,
+            undefined,
+            format,
+          );
           unresolved += tags.filter((tag) => !values.has(tag.id)).length;
           if (!values.size) continue;
           // 打开的文档走 Editor，后台文档用原子 process 防止覆盖同时编辑。 / Editor for open notes, guarded process for background notes.
@@ -222,7 +242,12 @@ export class IconConversion {
               openEditor = leaf.view.editor;
           });
           if (openEditor) {
-            const count = await this.convertEditor(openEditor, undefined, true);
+            const count = await this.convertEditor(
+              openEditor,
+              undefined,
+              true,
+              format,
+            );
             if (count === null) {
               failures++;
               continue;

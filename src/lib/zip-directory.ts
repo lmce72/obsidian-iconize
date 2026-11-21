@@ -318,7 +318,15 @@ export class ZipDirectory {
     return names;
   }
 
-  async read(path: string): Promise<string | null> {
+  /**
+   * 读取单个条目的原始字节 / Reads one entry as raw bytes.
+   *
+   * 与 {@link read} 共用同一条校验与解压路径；导入器需要字体等二进制条目，
+   * 不能先按 UTF-8 解码。
+   * Shares the validation and inflation path with {@link read}; importers need
+   * binary entries such as fonts, which must not be decoded as UTF-8 first.
+   */
+  async readBytes(path: string): Promise<Uint8Array | null> {
     const hash = hashName(path);
     let bucket = hash & (this.buckets.length - 1);
     let selected: { index: number; start: number } | null = null;
@@ -384,6 +392,11 @@ export class ZipDirectory {
     }
     if ((checksum ^ 0xffffffff) >>> 0 !== this.checksums[index])
       throw new Error('Invalid ZIP icon checksum');
-    return strFromU8(decoded);
+    return decoded;
+  }
+
+  async read(path: string): Promise<string | null> {
+    const decoded = await this.readBytes(path);
+    return decoded ? strFromU8(decoded) : null;
   }
 }

@@ -52,6 +52,13 @@ export default {
       entries: {
         '@app': 'src',
         '@lib': 'src/lib',
+        // 包的 `browser` 字段指向 CJS 构建，里面会 require('fs')；Obsidian 渲染进程没有
+        // Node 集成，顶层 require 会让整个 main.js 加载失败。改用无 Node 依赖的 ESM 构建。
+        //
+        // The package's `browser` field points at the CJS build, which requires 'fs'.
+        // The Obsidian renderer has no Node integration, so that top-level require breaks
+        // the whole bundle. Use the Node-free ESM build instead.
+        'opentype.js': 'opentype.js/dist/opentype.mjs',
       },
     }),
     typescript({ tsconfig: './tsconfig.build.json' }),

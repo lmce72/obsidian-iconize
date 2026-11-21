@@ -9,7 +9,15 @@ export default defineConfig(
   {
     // `deprecated/` holds archived CommonJS reference implementations that are not
     // part of the build, so they are not linted as source.
-    ignores: ['node_modules', 'dist', 'main.js', 'deprecated/**'],
+    ignores: [
+      'node_modules',
+      'dist',
+      'main.js',
+      'deprecated/**',
+      // 部署备份里的历史构建与一次性脚本不参与源码检查。
+      // Historical builds and one-off scripts under deployment backups are not source.
+      '.local-backups/**',
+    ],
   },
   eslint.configs.recommended,
   tseslint.configs.recommended,

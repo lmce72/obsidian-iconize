@@ -22,7 +22,10 @@ const getTitleIcon = (leaf: HTMLElement): HTMLElement | null => {
  * can bypass the gate.
  */
 const pendingRequests = new WeakMap<HTMLElement, number>();
-const menuHandlers = new WeakMap<HTMLElement, (path: string, event?: MouseEvent) => void>();
+const menuHandlers = new WeakMap<
+  HTMLElement,
+  (path: string, event?: MouseEvent) => void
+>();
 let requestSequence = 0;
 
 /**
@@ -180,8 +183,15 @@ const add = (
       titleIcon.addEventListener('click', openMenu);
       titleIcon.addEventListener('contextmenu', openMenu);
       titleIcon.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
-        event.preventDefault(); event.stopPropagation();
+        if (
+          event.key !== 'Enter' &&
+          event.key !== ' ' &&
+          event.key !== 'ContextMenu' &&
+          !(event.shiftKey && event.key === 'F10')
+        )
+          return;
+        event.preventDefault();
+        event.stopPropagation();
         const path = titleIcon.dataset.iconizePath;
         if (path) menuHandlers.get(titleIcon)?.(path);
       });

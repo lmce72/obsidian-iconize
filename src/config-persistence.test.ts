@@ -5,6 +5,7 @@ import {
   mergeConfig,
   stampConfigChanges,
   parseConfig,
+  parseConfigLenient,
   rebaseConfig,
 } from './lib/config-merge';
 import { readFileSync } from 'node:fs';
@@ -32,10 +33,16 @@ const methods = [
   'retryConfiguration',
   'withConfigurationMaintenance',
   'getConfigPath',
+  'getDefaultConfigPath',
   'getSettings',
   'removeFolderIcon',
   'setConfigPath',
+  'applyLoadedConfig',
+  'failConfigLoad',
+  'backupCorruptConfig',
   'loadIconFolderData',
+  'createOrSaveConfig',
+  'resetConfigPathToDefault',
   'saveIconFolderData',
   'scheduleConfigSave',
   'readCurrentConfig',
@@ -78,8 +85,10 @@ const Probe = new Function(
   'mergeConfig',
   'stampConfigChanges',
   'parseConfig',
+  'parseConfigLenient',
   'rebaseConfig',
   'DEFAULT_SETTINGS',
+  'DEFAULT_CONFIG_PATH',
   'Notice',
   'stateRoot',
   'window',
@@ -99,8 +108,10 @@ const Probe = new Function(
   mergeConfig,
   stampConfigChanges,
   parseConfig,
+  parseConfigLenient,
   rebaseConfig,
   defaults,
+  '.obsidian/plugins/obsidian-icon-folder/data.json',
   Notice,
   () => '.plugin/.iconize',
   {
@@ -175,6 +186,9 @@ async function fixture() {
     configPath: path,
     configSessionId: 'test',
     configLoadState: 'missing',
+    configLoadError: '',
+    configRecoveredWarnings: [],
+    configCorruptBackup: null,
     initializing: true,
     configBaseline: {},
     _lastSavedConfig: null,
@@ -332,21 +346,75 @@ describe('mtime-sensitive config persistence', () => {
     );
   });
 
-  it('exposes the actual invalid setting and retries successfully once repaired', async () => {
+  it('recovers usable data from an invalid setting, backs up the original and repairs on save', async () => {
     const f = await fixture();
     f.ready();
-    f.files.set(f.path, JSON.stringify({ settings: { iconPacksPath: [] } }));
+    const broken = JSON.stringify({
+      settings: { iconPacksPath: [] },
+      'old.md': 'LiHome',
+    });
+    f.files.set(f.path, broken);
     await f.plugin.loadIconFolderData();
-    expect(f.plugin.getConfigurationStatus()).toContain(
-      'Invalid setting: iconPacksPath',
-    );
-    const broken = f.files.get(f.path);
-    await f.plugin.saveIconFolderData();
-    expect(f.files.get(f.path)).toBe(broken);
-    f.files.set(f.path, JSON.stringify(f.baseline));
-    await f.plugin.retryConfiguration();
-    expect(f.plugin.getConfigurationStatus()).toContain('配置读取正常');
+
+    const status = f.plugin.getConfigurationStatus();
+    expect(status).toContain('已重置无效设置：iconPacksPath');
+    expect(status).toContain('.corrupt-');
+    expect(f.plugin.getSettings().iconPacksPath).toBe('.obsidian/icons');
     expect(f.plugin.data['old.md']).toBe('LiHome');
+    const backup = [...f.files.keys()].find((path) =>
+      path.includes('.corrupt-'),
+    );
+    expect(backup).toBeDefined();
+    expect(f.files.get(backup!)).toBe(broken);
+
+    await f.flush();
+    expect(JSON.parse(f.files.get(f.path)!).settings.iconPacksPath).toBe(
+      '.obsidian/icons',
+    );
+    expect(f.plugin.getConfigurationStatus()).toContain('配置读取正常');
+  });
+
+  it('backs up malformed JSON, keeps defaults usable and repairs it on save', async () => {
+    const f = await fixture();
+    f.ready();
+    const broken = '{"settings": {"fontSize": 16}, "old.md": ';
+    f.files.set(f.path, broken);
+    await f.plugin.loadIconFolderData();
+
+    expect(f.plugin.getConfigurationStatus()).toContain('JSON 无法解析');
+    expect(f.plugin.getSettings().fontSize).toBe(16);
+    const backup = [...f.files.keys()].find((path) =>
+      path.includes('.corrupt-'),
+    );
+    expect(f.files.get(backup!)).toBe(broken);
+
+    await f.flush();
+    expect(() => JSON.parse(f.files.get(f.path)!)).not.toThrow();
+    expect(f.plugin.getConfigurationStatus()).toContain('配置读取正常');
+  });
+
+  it('creates a missing config from the current defaults instead of dead-ending', async () => {
+    const f = await fixture();
+    f.ready();
+    f.files.delete(f.path);
+    await f.plugin.loadIconFolderData();
+    expect(f.plugin.getConfigurationStatus()).toContain('保存时会自动创建');
+    const pending = f.plugin.createOrSaveConfig();
+    await vi.advanceTimersByTimeAsync(800);
+    expect(await pending).toBe(true);
+    expect(f.files.has(f.path)).toBe(true);
+    expect(JSON.parse(f.files.get(f.path)!).settings).toBeDefined();
+  });
+
+  it('retries a missing config without writing a history snapshot', async () => {
+    const f = await fixture();
+    f.ready();
+    f.files.delete(f.path);
+    await f.plugin.loadIconFolderData();
+    const history = vi.spyOn(f.plugin, 'preserveConfigHistory');
+    await f.plugin.retryConfiguration();
+    expect(history).not.toHaveBeenCalled();
+    expect(f.plugin.getConfigurationStatus()).toContain('保存时会自动创建');
   });
 
   it('overwrites existing config and backup through supported APIs on successive saves', async () => {

@@ -15,6 +15,12 @@ import type { IconSource } from '@app/lib/icon-sources';
 import { indexAndRegisterPack } from '@app/lib/lazy-loading-integration';
 import { throwIfAborted, yieldToMain } from '@app/lib/task-scheduler';
 import { buildIndex } from '@app/lib/icon-indexing';
+import {
+  normalizeIconPack,
+  packNameFromFileName,
+  type NormalizedIconPack,
+  type PackInputFile,
+} from '@app/lib/pack-import';
 
 export interface Icon {
   name: string;
@@ -294,6 +300,7 @@ export class IconPackManager {
   public async registerIconPack(
     name: string,
     arrayBuffer: ArrayBuffer,
+    options: { extraPath?: string } = {},
   ): Promise<void> {
     if (!name || name.startsWith('.') || /[\\/\0]/.test(name))
       throw new Error('Invalid icon pack name');
@@ -303,15 +310,56 @@ export class IconPackManager {
       throw new Error('Icon loading is not ready; try importing again shortly');
     this.importing.add(name);
     try {
-      await this.importIconPack(name, arrayBuffer);
+      await this.importIconPack(
+        name,
+        arrayBuffer,
+        options.extraPath ?? getExtraPath(name) ?? '',
+      );
     } finally {
       this.importing.delete(name);
     }
   }
 
+  /**
+   * 导入任意受支持的图标包格式 / Imports any supported icon pack format.
+   *
+   * 先归一化为 SVG ZIP，再走普通归档的暂存、校验与提交路径；因此失败时原包不受影响。
+   * The input is normalized into an SVG ZIP first and then follows the ordinary staged,
+   * validated and committed archive path, so a failure never touches an existing pack.
+   */
+  public async importIconPackFromFiles(
+    inputs: PackInputFile[],
+    options: {
+      name?: string;
+      signal?: AbortSignal;
+      onProgress?: (message: string) => void;
+    } = {},
+  ): Promise<NormalizedIconPack & { name: string }> {
+    const normalized = await normalizeIconPack(inputs, options);
+    const font = inputs.find((input) =>
+      /\.(?:ttf|otf|woff2?)$/i.test(input.fileName),
+    );
+    const file = font ?? inputs[0];
+    // 字体家族名可能带空格或斜杠；统一成文件名可用的包名，避免生成不可安装的路径。
+    // Font family names may contain spaces or slashes; normalize them into a usable path.
+    const name =
+      options.name ??
+      packNameFromFileName(normalized.suggestedName ?? file.fileName);
+    const archive = normalized.archive;
+    const bytes = archive.buffer.slice(
+      archive.byteOffset,
+      archive.byteOffset + archive.byteLength,
+    ) as ArrayBuffer;
+    // 归一化归档已经选好图标根目录，无需再按包名套用预定义路径。
+    // The normalized archive already selected its icon root; no name-based path applies.
+    await this.registerIconPack(name, bytes, { extraPath: '' });
+    return { ...normalized, name };
+  }
+
   private async importIconPack(
     name: string,
     arrayBuffer: ArrayBuffer,
+    extraPath: string,
   ): Promise<void> {
     const adapter = this.plugin.app.vault.adapter;
     const system = this.plugin.lazyLoadingSystem;
@@ -330,16 +378,12 @@ export class IconPackManager {
         (await adapter.exists(`${this.path}/${name}`)))
     )
       throw new Error('A custom folder pack with this name already exists');
-    const stagedSource = new ZipSource(
-      adapter,
-      stagedPath,
-      getExtraPath(name) ?? '',
-    );
+    const stagedSource = new ZipSource(adapter, stagedPath, extraPath);
     const iconPack = new IconPack(
       this.plugin,
       name,
       false,
-      new ZipSource(adapter, zipPath, getExtraPath(name) ?? ''),
+      new ZipSource(adapter, zipPath, extraPath),
       name === LUCIDE_ICON_PACK_NAME ? 'Li' : undefined,
     );
     let backedUp = false;

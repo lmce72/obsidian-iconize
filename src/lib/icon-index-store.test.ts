@@ -256,6 +256,18 @@ describe('cooperative cold index naming', () => {
     expect(Array.from(compact)).toEqual(resolveEntryIds('Te', raws));
   });
 
+  it('keeps identifiers unique when a numeric suffix matches another real name', async () => {
+    const paths = [
+      'device-game-pad.svg',
+      'device-gamepad-2.svg',
+      'device-gamepad.svg',
+    ].map((path) => ({ path }));
+    const compact = Array.from(await resolveEntryIdsCompact('Ta', paths));
+    const expected = resolveEntryIds('Ta', paths);
+    expect(compact).toEqual(expected);
+    expect(new Set(compact.map((entry) => entry.id)).size).toBe(compact.length);
+  });
+
   it('keeps stable ordering across merge runs and yields during large cold builds', async () => {
     const raws = Array.from({ length: 6000 }, (_, row) => ({
       path: `root/${row % 2 ? 'a' : 'b'}/icon-${6000 - row}.svg`,
