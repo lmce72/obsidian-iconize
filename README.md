@@ -50,6 +50,8 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 
 ## Enhanced icon workflows
 
+Version 2.15.5 adds a circular shuffle button to the right of the color control in the icon picker. It shows the next batch of icons for the current query and skips every name already shown for that query; when no unseen icons remain it keeps the current batch and shows a notice. The button uses the same 40×40 / 48×48 circular size as the color control.
+
 Version 2.15.4 writes a valid ZIP64 archive when a normalized pack exceeds 65,535 icons. `fflate`'s ZIP writer stores the entry count in a 16-bit field, so selecting several large Iconify sets previously produced a corrupt central directory and the index reported `Invalid ZIP directory entry count`. A real three-set selection now imports 76,783 icons into a 31.81 MiB archive and indexes in about 216 ms.
 
 Version 2.15.3 separates non-SVG archive limits from the 8 MB per-icon limit. Iconify set JSONs larger than 8 MB now import normally (for example `material-symbols-light`: 24,167 icons), and sets above 64 MB are disabled in the picker and skipped with a clear reason instead of failing on the SVG limit.

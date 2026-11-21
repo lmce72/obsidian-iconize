@@ -1,5 +1,5 @@
 import { logger } from '@app/lib/logger';
-import { App, SuggestModal, ColorComponent, Notice } from 'obsidian';
+import { App, SuggestModal, ColorComponent, Notice, setIcon } from 'obsidian';
 import type IconizePlugin from '@app/main';
 import emoji from '@app/emoji';
 import { type Icon } from '@app/icon-pack-manager';
@@ -11,6 +11,11 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
   private request = 0;
   private closed = false;
   private closedQuery = '';
+  /** 本轮查询已展示过的图标 / Icons already shown for the current query. */
+  private seen = new Set<string>();
+  private lastQuery = '';
+  private lastResults: Icon[] = [];
+  private refreshRequested = false;
   public selectedColor?: string;
   public onSelect?: (iconName: string) => void;
   public onColor?: (color: string | undefined, query: string) => void;
@@ -78,6 +83,22 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
         this.close();
         this.onColor(color, query);
       });
+      const shuffle = toolbar.createEl('button', {
+        cls: 'iconize-picker-shuffle',
+        attr: {
+          type: 'button',
+          'aria-label': '换一批图标 / More icons',
+          title: '换一批图标 / More icons',
+        },
+      });
+      setIcon(shuffle, 'rotate-cw');
+      shuffle.addEventListener('click', () => {
+        // 同一查询下取下一批，跳过已经展示过的名称。
+        // Fetch the next batch for the same query, skipping names already shown.
+        this.refreshRequested = true;
+        this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+        this.inputEl.focus();
+      });
     }
     this.updatePreviewColor();
   }
@@ -120,6 +141,19 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
     await new Promise<void>((resolve) => window.setTimeout(resolve, 80));
     const cancelled = () => this.closed || request !== this.request;
     if (cancelled()) return [];
+
+    if (query !== this.lastQuery) {
+      this.lastQuery = query;
+      this.seen.clear();
+      this.lastResults = [];
+      this.refreshRequested = false;
+    }
+    // 只有「换一批」才排除已展示项；普通输入从第一批开始。
+    // Only the shuffle action excludes shown icons; ordinary input starts at the first batch.
+    const refreshing = this.refreshRequested;
+    const excluded = refreshing ? this.seen : null;
+    const exclude = excluded ? (id: string) => excluded.has(id) : undefined;
+
     const manager = this.plugin.getIconPackManager();
     const results: Icon[] = [];
     const emojiIcon = (unicode: string, name: string): Icon => ({
@@ -134,9 +168,10 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
     });
     if (!query.trim()) {
       for (const id of this.plugin.getSettings().recentlyUsedIcons) {
-        if (emoji.isEmoji(id))
-          results.push(emojiIcon(id, emoji.shortNames[id] ?? id));
-        else {
+        let item: Icon | null = null;
+        if (emoji.isEmoji(id)) {
+          item = emojiIcon(id, emoji.shortNames[id] ?? id);
+        } else {
           const found = manager
             .getIconPacks()
             .map((pack) =>
@@ -147,8 +182,9 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
               ),
             )
             .find(Boolean);
-          if (found) results.push({ ...found, displayName: id });
+          if (found) item = { ...found, displayName: id };
         }
+        if (item && !excluded?.has(item.displayName)) results.push(item);
       }
     }
     results.push(
@@ -156,19 +192,34 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
         query,
         this.limit - results.length,
         cancelled,
+        exclude,
       )),
     );
     if (cancelled()) return [];
     if (results.length < this.limit) {
       for (const [unicode, name] of Object.entries(emoji.shortNames)) {
+        if (excluded?.has(name)) continue;
         if ((name + unicode).toLowerCase().includes(query.toLowerCase()))
           results.push(emojiIcon(unicode, name));
         if (results.length >= this.limit) break;
       }
     }
-    return [
+    const unique = [
       ...new Map(results.map((item) => [item.displayName, item])).values(),
     ];
+    if (refreshing && !unique.length) {
+      new Notice('没有更多图标了 / No more icons');
+      this.refreshRequested = false;
+      return this.lastResults;
+    }
+    if (refreshing) {
+      for (const item of unique) this.seen.add(item.displayName);
+    } else {
+      this.seen = new Set(unique.map((item) => item.displayName));
+    }
+    this.lastResults = unique;
+    this.refreshRequested = false;
+    return unique;
   }
 
   onChooseSuggestion(item: Icon): void {

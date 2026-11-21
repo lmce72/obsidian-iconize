@@ -356,7 +356,7 @@
 .iconize-picker-search.prompt-input-container {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px;
+  grid-template-columns: minmax(0, 1fr) 40px 40px;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -379,7 +379,7 @@
 }
 .iconize-picker-clear {
   position: absolute;
-  inset-inline-end: 76px;
+  inset-inline-end: 128px;
   inset-block-start: 50%;
   transform: translateY(-50%);
   inline-size: 30px;
@@ -425,9 +425,37 @@
   opacity: 0;
   cursor: pointer;
 }
+/* 换一批：与颜色控件同尺寸的圆形按钮 / Shuffle: same size as the color control */
+.iconize-picker-shuffle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 40px;
+  block-size: 40px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+  background: var(--background-primary);
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  --icon-size: 20px;
+}
+.iconize-picker-shuffle:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.iconize-picker-shuffle:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+.iconize-picker-shuffle svg {
+  inline-size: 20px;
+  block-size: 20px;
+}
 @media (pointer: coarse), (max-width: 640px) {
   .iconize-picker-search.prompt-input-container {
-    grid-template-columns: minmax(0, 1fr) 48px;
+    grid-template-columns: minmax(0, 1fr) 48px 48px;
     gap: 8px;
     padding: 8px;
   }
@@ -435,14 +463,15 @@
     block-size: 48px;
     padding-inline-end: 48px;
   }
-  .iconize-picker-color {
+  .iconize-picker-color,
+  .iconize-picker-shuffle {
     inline-size: 48px;
     block-size: 48px;
   }
   .iconize-picker-clear {
     inline-size: 48px;
     block-size: 48px;
-    inset-inline-end: 64px;
+    inset-inline-end: 120px;
   }
 }
 .iconize-preview-colored .iconize-icon-preview {

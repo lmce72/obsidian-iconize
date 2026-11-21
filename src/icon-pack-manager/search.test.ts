@@ -102,4 +102,49 @@ describe('large icon search', () => {
     expect(await manager.searchIcons('circle right')).toEqual([]);
     expect(await manager.searchIcons('outline', 0)).toEqual([]);
   });
+  it('returns the next unseen batch when an exclusion is provided', async () => {
+    const pack = new IconPack(
+      {} as IconizePlugin,
+      'synthetic',
+      false,
+      undefined,
+      'Sy',
+    );
+    pack.setIndex(
+      Array.from({ length: 8 }, (_, index) => ({
+        id: `SyIcon${index}`,
+        name: `Icon${index}`,
+        displayName: `Icon${index}`,
+        folder: '',
+        path: `Icon${index}.svg`,
+      })),
+    );
+    const manager: IconPackManager = Object.assign(
+      Object.create(IconPackManager.prototype),
+      { iconPacks: [pack] },
+    );
+    const first = await manager.searchIcons('icon', 3);
+    const excluded = new Set(first.map((item) => item.prefix + item.name));
+    const second = await manager.searchIcons(
+      'icon',
+      3,
+      () => false,
+      (id) => excluded.has(id),
+    );
+    expect(second).toHaveLength(3);
+    for (const item of second)
+      expect(excluded.has(item.prefix + item.name)).toBe(false);
+
+    // 精确命中被排除后不能重复返回。 / An excluded exact match must not return.
+    const exact = await manager.searchIcons('Icon5', 5);
+    expect(exact.map((item) => item.name)).toEqual(['Icon5']);
+    expect(
+      await manager.searchIcons(
+        'Icon5',
+        5,
+        () => false,
+        (id) => id === 'SyIcon5',
+      ),
+    ).toEqual([]);
+  });
 });

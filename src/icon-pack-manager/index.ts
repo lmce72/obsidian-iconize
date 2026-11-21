@@ -562,6 +562,8 @@ export class IconPackManager {
     query: string,
     limit = 100,
     cancelled: () => boolean = () => false,
+    /** 跳过调用方已展示过的图标，用于「换一批」。 / Skip ids already shown by the caller. */
+    exclude?: (id: string) => boolean,
   ): Promise<Icon[]> {
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     const results: Icon[] = [];
@@ -573,6 +575,7 @@ export class IconPackManager {
         const exact = pack.findExactIcon(words[0]);
         if (exact) {
           const id = exact.prefix + exact.name;
+          if (exclude?.(id)) continue;
           results.push({ ...exact, displayName: id });
           seen.add(id);
           if (results.length >= limit) return results;
@@ -587,7 +590,7 @@ export class IconPackManager {
           pack.getName(),
           (entry) => {
             const id = pack.getPrefix() + entry.name;
-            if (!seen.has(id)) {
+            if (!seen.has(id) && !exclude?.(id)) {
               seen.add(id);
               results.push({
                 name: entry.name,
@@ -615,7 +618,11 @@ export class IconPackManager {
         const id = pack.getPrefix() + item.name;
         const haystack =
           `${id} ${item.displayName} ${pack.getName()}`.toLowerCase();
-        if (!seen.has(id) && words.every((word) => haystack.includes(word))) {
+        if (
+          !seen.has(id) &&
+          !exclude?.(id) &&
+          words.every((word) => haystack.includes(word))
+        ) {
           const icon = pack.getIcon(item.name);
           if (icon) {
             seen.add(id);
