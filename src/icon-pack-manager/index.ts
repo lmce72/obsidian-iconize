@@ -97,6 +97,10 @@ function relevanceScore(
   const name = icon.name.toLowerCase();
   const display = icon.displayName.toLowerCase();
   const id = `${icon.prefix}${icon.name}`.toLowerCase();
+  const compactName = name.replace(/[\s_-]+/g, '');
+  const compactDisplay = display.replace(/[\s_-]+/g, '');
+  const compactId = id.replace(/[\s_-]+/g, '');
+  const compactNeedle = needle.replace(/[\s_-]+/g, '');
   let score = 0;
   if (needle && (name === needle || display === needle || id === needle))
     score += 1000;
@@ -116,23 +120,43 @@ function relevanceScore(
     const fuzzyValues = [name, display, id]
       .map((value) => fuzzyScore(value, needle))
       .filter((value): value is number => value !== null);
-    if (!fuzzyValues.length) return -1;
-    score += 100 + Math.max(...fuzzyValues);
+    // 多词查询的整串可能不连续；每个词是否命中已由调用方验证。
+    // A multi-word needle may not be contiguous; the caller verified each word.
+    score += fuzzyValues.length ? 100 + Math.max(...fuzzyValues) : 50;
   } else {
     // 多词查询不要求整串连续出现；调用方已验证每个词都命中。
     // Multi-word queries need not contain the joined string; the caller verified each word.
     score += 50;
   }
 
+  // 词序无关：去掉空格、连字符、下划线后整串相同、包含或子序列。
+  // Word order independent: compare the joined form without spaces, hyphens or underscores.
+  if (compactNeedle) {
+    if (compactName === compactNeedle) score += 900;
+    else if (compactName.includes(compactNeedle)) score += 400;
+    else {
+      const compactFuzzy = [compactName, compactDisplay, compactId]
+        .map((value) => fuzzyScore(value, compactNeedle))
+        .filter((value): value is number => value !== null);
+      if (compactFuzzy.length) score += 200 + Math.max(...compactFuzzy);
+    }
+  }
+
   const position = name.indexOf(needle);
   if (position > 0) score -= Math.min(position, 40) * 2;
   score -= Math.min(name.length, 80);
+  let covered = words.length > 0;
   for (const word of words) {
+    const compactWord = word.replace(/[\s_-]+/g, '');
     if (name === word) score += 220;
     else if (name.startsWith(word)) score += 120;
-    else if (name.includes(word)) score += 40;
+    else if (name.includes(word)) score += 40 + word.length * 10;
+    else if (compactName.includes(compactWord)) score += 30 + word.length * 8;
     else if (display.includes(word)) score += 15;
+    else if (fuzzy && fuzzyScore(compactName, word) !== null) score += 10;
+    else covered = false;
   }
+  if (covered && words.length > 1) score += 200;
   return score;
 }
 

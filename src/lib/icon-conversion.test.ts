@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Editor } from 'obsidian';
 import type IconizePlugin from '@app/main';
-import { IconConversion } from './icon-conversion';
+import { IconConversion, formatIconEmbed } from './icon-conversion';
 
 vi.mock('obsidian', () => ({
   Notice: class {
@@ -107,6 +107,18 @@ describe('icon conversion pipeline', () => {
       expect(image.getAttribute('height')).toBe('16');
     }
     expect(await f.conversion.convertEditor(f.editor)).toBe(0);
+  });
+
+  it('formats each embed form consistently', () => {
+    const markup =
+      '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 0h16"/></svg>';
+    expect(formatIconEmbed('LiCog', markup, 'svg')).toBe(markup);
+    const data = formatIconEmbed('LiCog', markup, 'data');
+    expect(data).toMatch(/^<img alt="LiCog" src="data:image\/svg\+xml;base64,/);
+    expect(window.atob(/base64,([^"]*)/.exec(data)![1])).toContain('#808080');
+    expect(formatIconEmbed('LiCog', markup, 'file')).toBe(
+      '![LiCog](<Iconize SVG/LiCog.svg>)',
+    );
   });
 
   it('supports readable SVG output without Base64', async () => {

@@ -77,6 +77,7 @@ import { IconConversion } from './lib/icon-conversion';
 import { findIconTags } from './lib/icon-tags';
 import IconConverterModal from './ui/icon-converter-modal';
 import IconEmbedFormatModal from './ui/icon-embed-format-modal';
+import IconsPickerModal from './ui/icons-picker-modal';
 import ConfigRecoveryModal from './ui/config-recovery-modal';
 import NotebookNavigatorIntegration from './integrations/notebook-navigator';
 // ===== PATCHED: 按需加载系统 / Lazy loading system =====
@@ -396,6 +397,12 @@ export default class IconizePlugin extends Plugin {
       id: 'convert-icon-tags-to-svg',
       name: '转换图标标签至 SVG 图标元素（转换器）',
       callback: () => new IconConverterModal(this).open(),
+    });
+    this.addCommand({
+      id: 'browse-icon-ids',
+      name: '浏览图标 ID、标签与嵌入形式 / Browse icon IDs, tags and embed forms',
+      callback: () =>
+        new IconsPickerModal(this.app, this, '', undefined, false, true).open(),
     });
     this.addCommand({
       id: 'recover-configuration',

@@ -1,13 +1,22 @@
 import { logger } from '@app/lib/logger';
-import { App, SuggestModal, ColorComponent, Notice, setIcon } from 'obsidian';
+import {
+  App,
+  SuggestModal,
+  ColorComponent,
+  Menu,
+  Notice,
+  setIcon,
+} from 'obsidian';
 import type IconizePlugin from '@app/main';
 import emoji from '@app/emoji';
 import { type Icon } from '@app/icon-pack-manager';
+import iconLib from '@app/lib/icon';
 import dom from '@app/lib/util/dom';
 import { saveIconToIconPack } from '@app/util';
 import IconPickerFilterModal, {
   type PickerFilterState,
 } from './icon-picker-filter-modal';
+import IconDetailsModal from './icon-details-modal';
 
 const FILTER_STORAGE_KEY = 'iconize:picker-filters';
 
@@ -24,6 +33,10 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
   private familyFilter = new Set<string>();
   private fuzzySearch = false;
   private sortByRelevance = true;
+  /** 仅查看图标信息，不选色、不赋给文件。 / Inspect only: no color, no assignment. */
+  private inspect = false;
+  /** 详情弹窗打开期间抑制 SDK 关闭搜索器。 / Suppress SDK close while details are open. */
+  private detailOpen = false;
   public selectedColor?: string;
   public onSelect?: (iconName: string) => void;
   public onColor?: (color: string | undefined, query: string) => void;
@@ -36,22 +49,31 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
     private path: string,
     initialColor?: string,
     preserveUndefinedColor = false,
+    inspect = false,
   ) {
     super(app);
     this.limit = 100;
+    this.inspect = inspect;
     this.loadFilterPreferences();
     plugin.trackModal(this);
-    this.setPlaceholder('搜索图标名称或图标包 / Search icon or pack');
+    this.setPlaceholder(
+      inspect
+        ? '搜索图标并查看标签、ID 与嵌入形式 / Search icons to inspect'
+        : '搜索图标名称或图标包 / Search icon or pack',
+    );
     this.resultContainerEl.classList.add('iconize-modal');
-    this.selectedColor = preserveUndefinedColor
-      ? initialColor
-      : (initialColor ??
-        plugin.getIconColor(path) ??
-        plugin.getSettings().iconColor ??
-        undefined);
+    this.selectedColor = inspect
+      ? undefined
+      : preserveUndefinedColor
+        ? initialColor
+        : (initialColor ??
+          plugin.getIconColor(path) ??
+          plugin.getSettings().iconColor ??
+          undefined);
     const toolbar = this.inputEl.parentElement;
     if (toolbar) {
       toolbar.addClass('iconize-picker-search');
+      if (inspect) toolbar.addClass('iconize-picker-inspect');
       // 保留 SDK 输入节点和行为，清除控件只通过原生 input 事件更新查询。
       // Keep the SDK-owned input; update its query through the native input event.
       const clear = toolbar.createEl('button', {
@@ -74,6 +96,32 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
         updateClear();
       });
       updateClear();
+      // 搜索框左侧显示当前已设置的图标；点击复制标签或原生 ID。
+      // Show the icon already set for this path; click to copy its tag or native ID.
+      if (!inspect && this.path) {
+        const currentId = iconLib.getByPath(this.plugin, this.path);
+        if (currentId) {
+          toolbar.addClass('has-current-icon');
+          const currentButton = toolbar.createEl('button', {
+            cls: 'iconize-picker-current',
+            attr: {
+              type: 'button',
+              'aria-label': '当前图标 / Current icon',
+              title:
+                '当前图标：点击复制标签或原生 ID / Current icon: copy tag or native ID',
+            },
+          });
+          if (emoji.isEmoji(currentId)) currentButton.setText(currentId);
+          else
+            dom.setIconForNode(this.plugin, currentId, currentButton, {
+              shouldApplyAllStyles: false,
+              persist: false,
+            });
+          currentButton.addEventListener('click', (event) =>
+            this.openCurrentIconMenu(currentId, event),
+          );
+        }
+      }
       const filterButton = toolbar.createEl('button', {
         cls: 'iconize-picker-filter',
         attr: {
@@ -87,24 +135,28 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
       filterButton.addEventListener('click', () =>
         this.openFilterModal(filterButton),
       );
-      const colorContainer = toolbar.createDiv({ cls: 'iconize-picker-color' });
-      new ColorComponent(colorContainer)
-        .setValue(this.selectedColor ?? '#808080')
-        .onChange((value) => {
-          this.selectedColor = value;
-          this.updatePreviewColor();
+      if (!inspect) {
+        const colorContainer = toolbar.createDiv({
+          cls: 'iconize-picker-color',
         });
-      const colorInput = colorContainer.querySelector('input');
-      colorInput?.setAttribute('aria-label', '设置图标颜色 / Set icon color');
-      colorInput?.setAttribute('title', '设置图标颜色 / Set icon color');
-      colorInput?.addEventListener('click', (event) => {
-        if (!this.onColor) return;
-        event.preventDefault();
-        const query = this.inputEl.value;
-        const color = this.selectedColor;
-        this.close();
-        this.onColor(color, query);
-      });
+        new ColorComponent(colorContainer)
+          .setValue(this.selectedColor ?? '#808080')
+          .onChange((value) => {
+            this.selectedColor = value;
+            this.updatePreviewColor();
+          });
+        const colorInput = colorContainer.querySelector('input');
+        colorInput?.setAttribute('aria-label', '设置图标颜色 / Set icon color');
+        colorInput?.setAttribute('title', '设置图标颜色 / Set icon color');
+        colorInput?.addEventListener('click', (event) => {
+          if (!this.onColor) return;
+          event.preventDefault();
+          const query = this.inputEl.value;
+          const color = this.selectedColor;
+          this.close();
+          this.onColor(color, query);
+        });
+      }
       const shuffle = toolbar.createEl('button', {
         cls: 'iconize-picker-shuffle',
         attr: {
@@ -122,7 +174,7 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
         this.inputEl.focus();
       });
     }
-    this.updatePreviewColor();
+    if (!inspect) this.updatePreviewColor();
   }
 
   private updatePreviewColor(): void {
@@ -138,6 +190,46 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
     this.resultContainerEl.toggleClass('iconize-preview-colored', !!color);
   }
 
+  /**
+   * 当前图标的复制菜单 / Copy menu for the current icon.
+   *
+   * 提供 Iconize 标签（如 `:LiCog:`）与去掉家族前缀的原生 ID（如 `Cog`）。
+   * Offers the Iconize tag (`:LiCog:`) and the native ID without the pack prefix (`Cog`).
+   */
+  private openCurrentIconMenu(id: string, event: MouseEvent): void {
+    const menu = new Menu();
+    const identifier = this.plugin.getSettings().iconIdentifier;
+    const pack = this.plugin
+      .getIconPackManager()
+      .getIconPacks()
+      .find((candidate) => id.startsWith(candidate.getPrefix()));
+    const native = pack ? id.slice(pack.getPrefix().length) || id : id;
+    const tag = `${identifier}${id}${identifier}`;
+    menu.addItem((item) =>
+      item
+        .setTitle(`复制 Iconize 标签 ${tag}`)
+        .setIcon('copy')
+        .onClick(() => void this.copyToClipboard(tag)),
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle(`复制原生 ID ${native}`)
+        .setIcon('copy')
+        .onClick(() => void this.copyToClipboard(native)),
+    );
+    menu.showAtMouseEvent(event);
+  }
+
+  private async copyToClipboard(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice(`Iconize：已复制 ${text}`);
+    } catch (error) {
+      logger.error('[Iconize] Clipboard failed:', undefined, error);
+      new Notice('Iconize：无法访问剪贴板，请手动复制。');
+    }
+  }
+
   onOpen(): void {
     this.closed = false;
     super.onOpen();
@@ -145,6 +237,13 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
       this.inputEl.value = this.initialQuery;
       this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
     }
+  }
+
+  close(): void {
+    // 详情打开时 SDK 会尝试关闭搜索器；保留它以便「返回搜索器」。
+    // The SDK may try to close the picker when a suggestion is chosen; keep it for "Back".
+    if (this.inspect && this.detailOpen) return;
+    super.close();
   }
 
   onClose(): void {
@@ -344,6 +443,20 @@ export default class IconsPickerModal extends SuggestModal<Icon> {
   }
 
   onChooseSuggestion(item: Icon): void {
+    if (this.inspect) {
+      // 浏览模式只打开详情，不关闭搜索器。 / Browse mode opens details without closing the picker.
+      this.detailOpen = true;
+      new IconDetailsModal(this.plugin, item, {
+        onClosed: () => {
+          this.detailOpen = false;
+        },
+        closeSearch: () => {
+          this.detailOpen = false;
+          this.close();
+        },
+      }).open();
+      return;
+    }
     if (this.onDraftSelect) {
       const query = this.closed ? this.closedQuery : this.inputEl.value;
       if (!this.closed) this.close();

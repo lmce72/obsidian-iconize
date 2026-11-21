@@ -50,6 +50,8 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 
 ## Enhanced icon workflows
 
+Version 2.15.7 improves the picker's search and adds an inspect workflow. Relevance now handles reordered words and compact forms, so `codex logos` ranks `LogosCodex` highly; fuzzy search reaches reversed/compact spellings such as `codexlogos`. The picker shows the path's current icon at the left of the search box; clicking it offers the Iconize tag (`:LiCog:`) or the native ID without the pack prefix (`Cog`) for copying. A new command, "Browse icon IDs, tags and embed forms", opens the picker with color selection disabled: choosing an icon shows a details view with copyable code blocks for the icon, native/full ID, Iconize tag, SVG element, Base64 image and file reference. "Back" returns to the search; "Close" closes both.
+
 Version 2.15.6 adds an icon-family filter to the picker, to the left of the color control. It multi-selects icon packs (and the Emoji pseudo-family), and includes toggles for fuzzy subsequence matching and relevance-descending sorting. Filter choices persist in local storage; the filter button uses the same circular 40×40 / 48×48 size as the color and shuffle controls.
 
 Version 2.15.5 adds a circular shuffle button to the right of the color control in the icon picker. It shows the next batch of icons for the current query and skips every name already shown for that query; when no unseen icons remain it keeps the current batch and shows a notice. The button uses the same 40×40 / 48×48 circular size as the color control.

@@ -13,6 +13,27 @@ import icon from './icon';
 import { findIconTags, replaceIconTags, IconTag } from './icon-tags';
 
 /** 共用解析与转换管道，手动和自动入口保持一致。 / Shared pipeline for manual and automatic conversion. */
+export function formatIconEmbed(
+  id: string,
+  markup: string,
+  format: IconEmbedFormat,
+): string {
+  if (format === 'svg') return markup;
+  if (format === 'data') {
+    // 自包含图片无需插件或附件，部分平台会限制 data URI。
+    // Self-contained image; some platforms restrict data URIs.
+    const bytes = new TextEncoder().encode(
+      markup.replace(/currentColor/g, '#808080'),
+    );
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return `<img alt="${id}" src="data:image/svg+xml;base64,${window.btoa(
+      binary,
+    )}" width="16" height="16">`;
+  }
+  return `![${id}](<Iconize SVG/${id}.svg>)`;
+}
+
 export class IconConversion {
   private timers = new Map<Editor, number>();
   private stopped = false;
@@ -79,16 +100,7 @@ export class IconConversion {
       if (format === 'svg') {
         values.set(id, markup);
       } else if (format === 'data') {
-        // 自包含图片无需插件或附件，部分平台会限制 data URI。 / Self-contained image; some platforms restrict data URIs.
-        const bytes = new TextEncoder().encode(
-          markup.replace(/currentColor/g, '#808080'),
-        );
-        let binary = '';
-        for (const byte of bytes) binary += String.fromCharCode(byte);
-        values.set(
-          id,
-          `<img alt="${id}" src="data:image/svg+xml;base64,${window.btoa(binary)}" width="16" height="16">`,
-        );
+        values.set(id, formatIconEmbed(id, markup, 'data'));
       } else {
         // 文件名来自规范 id；已有资源相同则复用，内容变化时另存，绝不覆盖用户文件。
         // Reuse identical assets; version changed content without overwriting user files.

@@ -702,3 +702,79 @@
   color: var(--text-muted);
   font-size: var(--font-ui-small);
 }
+
+/* 当前图标与浏览模式 / Current icon and inspect mode */
+.iconize-picker-current {
+  position: absolute;
+  inset-inline-start: 24px;
+  inset-block-start: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 28px;
+  block-size: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.iconize-picker-current:hover {
+  background-color: var(--background-modifier-hover);
+}
+.iconize-picker-current:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+}
+.iconize-picker-current svg {
+  inline-size: 20px;
+  block-size: 20px;
+}
+.iconize-picker-search.has-current-icon .prompt-input {
+  padding-inline-start: 40px;
+}
+.iconize-picker-search.iconize-picker-inspect {
+  grid-template-columns: minmax(0, 1fr) 40px 40px;
+}
+.iconize-picker-inspect .iconize-picker-clear {
+  inset-inline-end: 128px;
+}
+@media (pointer: coarse), (max-width: 640px) {
+  .iconize-picker-current {
+    inset-inline-start: 16px;
+  }
+  .iconize-picker-search.has-current-icon .prompt-input {
+    padding-inline-start: 40px;
+  }
+  .iconize-picker-search.iconize-picker-inspect {
+    grid-template-columns: minmax(0, 1fr) 48px 48px;
+  }
+  .iconize-picker-inspect .iconize-picker-clear {
+    inset-inline-end: 120px;
+  }
+}
+
+/* 图标详情 / Icon details */
+.iconize-icon-detail-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 96px;
+  margin-block: 8px 4px;
+  color: var(--text-normal);
+  font-size: 64px;
+}
+.iconize-icon-detail-preview svg {
+  inline-size: 72px;
+  block-size: 72px;
+}
+.iconize-icon-detail-id {
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+}
+.iconize-icon-detail-code {
+  margin-block-end: 8px;
+}

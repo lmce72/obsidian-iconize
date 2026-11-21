@@ -161,6 +161,46 @@ describe('large icon search', () => {
     ).toEqual(['Heart', 'Heartbeat', 'BookHeart']);
   });
 
+  it('ranks reordered words and compact fuzzy matches highly', async () => {
+    const pack = new IconPack(
+      {} as IconizePlugin,
+      'codex',
+      false,
+      undefined,
+      'Cx',
+    );
+    pack.setIndex(
+      ['LogosCodex', 'Codex', 'Logos', 'CodexLogo'].map((name) => ({
+        id: `Cx${name}`,
+        name,
+        displayName: name,
+        folder: '',
+        path: `${name}.svg`,
+      })),
+    );
+    const manager: IconPackManager = Object.assign(
+      Object.create(IconPackManager.prototype),
+      { iconPacks: [pack] },
+    );
+
+    expect(
+      (
+        await manager.searchIcons('codex logos', 10, () => false, undefined, {
+          sortByRelevance: true,
+        })
+      )[0]?.name,
+    ).toBe('LogosCodex');
+
+    expect(await manager.searchIcons('codexlogos', 10)).toEqual([]);
+    expect(
+      (
+        await manager.searchIcons('codexlogos', 10, () => false, undefined, {
+          fuzzy: true,
+        })
+      ).map((item) => item.name),
+    ).toContain('LogosCodex');
+  });
+
   it('returns the next unseen batch when an exclusion is provided', async () => {
     const pack = new IconPack(
       {} as IconizePlugin,
