@@ -10,7 +10,12 @@
  */
 
 import { strToU8, zipSync } from 'fflate';
-import { baseName, openArchive, type ArchiveReader } from './archive';
+import {
+  baseName,
+  MAX_TEXT_ENTRY_BYTES,
+  openArchive,
+  type ArchiveReader,
+} from './archive';
 import { convertFontPackage } from './font';
 import { convertIconifyJson, isIconifyJson } from './iconify';
 import { convertJsModuleArchive } from './js-module';
@@ -55,6 +60,15 @@ export interface PackImportOptions {
 
 const FONT_EXTENSIONS = ['.ttf', '.otf', '.woff', '.woff2'];
 const CSS_EXTENSIONS = ['.css'];
+/**
+ * 单个 Iconify JSON 的安全上限。fluent-emoji 等集合超过 64 MB，转换会产生
+ * 数十万个图标并耗尽内存；宁可明确跳过，也不让渲染进程崩溃。
+ *
+ * Safety ceiling for one Iconify JSON. Sets such as fluent-emoji exceed 64 MB and would
+ * produce hundreds of thousands of icons; skip them explicitly instead of exhausting
+ * renderer memory.
+ */
+export const MAX_ICONIFY_JSON_BYTES = 64 * 1024 * 1024;
 
 function extensionOf(fileName: string): string {
   const name = fileName.toLowerCase();
@@ -105,11 +119,11 @@ async function fontInputsFromArchive(
   if (!reader) return [];
   const inputs: PackInputFile[] = [];
   for (const name of fontNames) {
-    const bytes = await reader.readBytes(name);
+    const bytes = await reader.readBytes(name, MAX_TEXT_ENTRY_BYTES);
     if (bytes) inputs.push({ fileName: baseName(name), bytes });
   }
   for (const css of cssNames) {
-    const bytes = await reader.readBytes(css);
+    const bytes = await reader.readBytes(css, MAX_TEXT_ENTRY_BYTES);
     if (bytes) inputs.push({ fileName: baseName(css), bytes });
   }
   return inputs;
@@ -133,15 +147,20 @@ async function findIconifySets(
   );
   if (preferred.length) {
     for (const path of preferred.slice(0, 3)) {
-      const text = await reader.readText(path);
+      const size = await reader.sizeOf(path);
+      if (size !== null && size > MAX_ICONIFY_JSON_BYTES) continue;
+      const text = await reader.readText(path, MAX_TEXT_ENTRY_BYTES);
       if (!text) continue;
       try {
         const parsed: unknown = JSON.parse(text);
         if (isIconifyJson(parsed)) {
-          return preferred.map((candidate) => ({
-            path: candidate,
-            prefix: baseName(candidate).replace(/\.json$/i, ''),
-          }));
+          return Promise.all(
+            preferred.map(async (candidate) => ({
+              path: candidate,
+              prefix: baseName(candidate).replace(/\.json$/i, ''),
+              size: (await reader.sizeOf(candidate)) ?? undefined,
+            })),
+          );
         }
       } catch {
         // Not an Iconify JSON; keep looking among the next candidates.
@@ -157,7 +176,9 @@ async function findIconifySets(
   for (const path of reader.names.filter((name) =>
     name.toLowerCase().endsWith('.json'),
   )) {
-    const text = await reader.readText(path);
+    const size = await reader.sizeOf(path);
+    if (size !== null && size > MAX_ICONIFY_JSON_BYTES) continue;
+    const text = await reader.readText(path, MAX_TEXT_ENTRY_BYTES);
     if (!text) continue;
     try {
       const parsed: unknown = JSON.parse(text);
@@ -165,6 +186,7 @@ async function findIconifySets(
         found.push({
           path,
           prefix: baseName(path).replace(/\.json$/i, ''),
+          size: size ?? undefined,
         });
       }
     } catch {
@@ -209,7 +231,17 @@ async function convertIconifyArchive(
     context.onProgress?.(
       `正在转换 Iconify 图标集 ${index + 1}/${selected.length}：${set.prefix}`,
     );
-    const text = await reader.readText(set.path);
+    const size = await reader.sizeOf(set.path);
+    if (size !== null && size > MAX_ICONIFY_JSON_BYTES) {
+      skipped++;
+      warnings.push(
+        `${set.prefix}：JSON 超过 ${Math.round(
+          MAX_ICONIFY_JSON_BYTES / 1024 / 1024,
+        )} MB，已跳过`,
+      );
+      continue;
+    }
+    const text = await reader.readText(set.path, MAX_TEXT_ENTRY_BYTES);
     if (text === null) {
       skipped++;
       warnings.push(`${set.prefix}：无法读取`);
@@ -241,7 +273,11 @@ async function convertIconifyArchive(
   }
 
   if (!icons.length)
-    throw new Error('没有转换出任何 Iconify 图标 / No Iconify icons produced');
+    throw new Error(
+      `没有转换出任何 Iconify 图标 / No Iconify icons produced${
+        warnings.length ? `：${warnings.join('；')}` : ''
+      }`,
+    );
   return {
     format: 'iconify-archive',
     label: 'Iconify 图标集 / Iconify sets',

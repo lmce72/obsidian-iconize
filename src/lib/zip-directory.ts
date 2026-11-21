@@ -326,7 +326,10 @@ export class ZipDirectory {
    * Shares the validation and inflation path with {@link read}; importers need
    * binary entries such as fonts, which must not be decoded as UTF-8 first.
    */
-  async readBytes(path: string): Promise<Uint8Array | null> {
+  async readBytes(
+    path: string,
+    maxBytes = MAX_ICON_BYTES,
+  ): Promise<Uint8Array | null> {
     const hash = hashName(path);
     let bucket = hash & (this.buckets.length - 1);
     let selected: { index: number; start: number } | null = null;
@@ -361,8 +364,14 @@ export class ZipDirectory {
       throw new Error('Encrypted ZIP icons are unsupported');
     const originalSize = this.originalSizes[index];
     const size = this.sizes[index];
-    if (originalSize > MAX_ICON_BYTES || size > MAX_ICON_BYTES * 2)
-      throw new Error('SVG exceeds the 8 MB per-icon limit');
+    if (originalSize > maxBytes || size > maxBytes * 2)
+      throw new Error(
+        maxBytes === MAX_ICON_BYTES
+          ? 'SVG exceeds the 8 MB per-icon limit'
+          : `Archive entry exceeds the ${Math.round(
+              maxBytes / 1024 / 1024,
+            )} MB limit`,
+      );
     const method = this.methodsAndFlags[index] >>> 16;
     if (method !== 0 && method !== 8)
       throw new Error('Unsupported ZIP compression method');
@@ -395,8 +404,45 @@ export class ZipDirectory {
     return decoded;
   }
 
-  async read(path: string): Promise<string | null> {
-    const decoded = await this.readBytes(path);
+  /**
+   * 条目的解压后大小 / Inflated size of one entry.
+   *
+   * 只读中央目录与本地文件名，不解压内容；用于在选择大 JSON 图标集前给出提示。
+   * Reads the central directory and local file name without inflating; useful for
+   * warning about large JSON sets before reading them.
+   */
+  async sizeOf(path: string): Promise<number | null> {
+    const hash = hashName(path);
+    let bucket = hash & (this.buckets.length - 1);
+    let selected: number | null = null;
+    while (this.buckets[bucket]) {
+      const index = this.buckets[bucket] - 1;
+      bucket = (bucket + 1) & (this.buckets.length - 1);
+      if (this.hashes[index] !== hash) continue;
+      const localOffset = this.offsets[index];
+      const header = await ZipDirectory.range(this.reader, localOffset, 30);
+      const view = new DataView(
+        header.buffer,
+        header.byteOffset,
+        header.byteLength,
+      );
+      if (view.getUint32(0, true) !== 0x04034b50)
+        throw new Error('Invalid ZIP local header');
+      const nameLength = view.getUint16(26, true);
+      const flags = this.methodsAndFlags[index] & 65535;
+      const nameBytes = await ZipDirectory.range(
+        this.reader,
+        localOffset + 30,
+        nameLength,
+      );
+      if (strFromU8(nameBytes, !(flags & 2048)) !== path) continue;
+      selected = index;
+    }
+    return selected === null ? null : this.originalSizes[selected];
+  }
+
+  async read(path: string, maxBytes = MAX_ICON_BYTES): Promise<string | null> {
+    const decoded = await this.readBytes(path, maxBytes);
     return decoded ? strFromU8(decoded) : null;
   }
 }

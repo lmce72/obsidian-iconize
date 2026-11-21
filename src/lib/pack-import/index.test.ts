@@ -181,6 +181,9 @@ describe('normalizeIconPack', () => {
     const result = await normalizeIconPack([file('iconify.zip', zip)], {
       selectIconifySets: async (sets) => {
         offered.push(...sets.map((set) => set.prefix));
+        expect(sets.find((set) => set.prefix === 'bb')?.size).toBeGreaterThan(
+          0,
+        );
         return [sets.find((set) => set.prefix === 'bb')!.path];
       },
     });

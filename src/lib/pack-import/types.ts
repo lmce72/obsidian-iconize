@@ -32,6 +32,8 @@ export interface IconifySetInfo {
   prefix: string;
   /** info.name，可选 / Optional human-readable name. */
   name?: string;
+  /** 解压后的 JSON 大小，用于在选择器中标记过大的集合。 */
+  size?: number;
 }
 
 /** 用户选中的一个文件 / One file selected by the user. */

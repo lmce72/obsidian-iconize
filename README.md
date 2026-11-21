@@ -50,6 +50,8 @@ in `src/`, not in the installed bundle. `pnpm dev` watches and rebuilds locally.
 
 ## Enhanced icon workflows
 
+Version 2.15.3 separates non-SVG archive limits from the 8 MB per-icon limit. Iconify set JSONs larger than 8 MB now import normally (for example `material-symbols-light`: 24,167 icons), and sets above 64 MB are disabled in the picker and skipped with a clear reason instead of failing on the SVG limit.
+
 Version 2.15.2 recognizes archives of multiple Iconify sets, such as the `icon-sets` repository ZIP with its `json/*.json` layout. A picker lists the sets; only the checked JSON files are read and converted. Selecting several sets uses each Iconify prefix as a folder so equal names stay distinct; selecting one names the pack after that prefix. Importing all sets is supported but can produce a very large archive.
 
 Version 2.15.1 fixes the configuration dead end and the recovery dialog: a missing config is treated as a normal fresh install, a damaged config is backed up and its usable icon records/settings are recovered, a config path copied from another vault is recreated (or can be reset to the default), and recovery actions close the dialog before doing their I/O and report through a notice. Reset/restore now opens a reload prompt because the new path cannot be hot-swapped. The diagnostics also show copyable sync-exclusion rules for `.iconize` (Syncthing, Git, Obsidian Sync, Remotely Save). See [configuration, recovery and sync exclusions](docs/good-to-know/sync-config.md).

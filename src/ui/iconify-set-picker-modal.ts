@@ -1,5 +1,8 @@
 import { App, Modal, Setting } from 'obsidian';
-import type { IconifySetInfo } from '@app/lib/pack-import';
+import {
+  MAX_ICONIFY_JSON_BYTES,
+  type IconifySetInfo,
+} from '@app/lib/pack-import';
 
 /**
  * 从归档中选择 Iconify 图标集 / Picks Iconify sets from an archive.
@@ -43,7 +46,9 @@ export default class IconifySetPickerModal extends Modal {
       .setDesc('只读取勾选的 JSON。')
       .addButton((button) =>
         button.setButtonText('全选 / All').onClick(() => {
-          for (const set of this.sets) this.selected.add(set.path);
+          for (const set of this.sets)
+            if ((set.size ?? 0) <= MAX_ICONIFY_JSON_BYTES)
+              this.selected.add(set.path);
           this.renderList();
         }),
       )
@@ -94,11 +99,13 @@ export default class IconifySetPickerModal extends Modal {
       );
     });
     for (const set of matches) {
+      const tooLarge = (set.size ?? 0) > MAX_ICONIFY_JSON_BYTES;
       const label = this.listEl.createEl('label', {
-        cls: 'iconize-iconify-set-row',
+        cls: `iconize-iconify-set-row${tooLarge ? ' is-too-large' : ''}`,
       });
       const checkbox = label.createEl('input', { type: 'checkbox' });
-      checkbox.checked = this.selected.has(set.path);
+      checkbox.checked = !tooLarge && this.selected.has(set.path);
+      checkbox.disabled = tooLarge;
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) this.selected.add(set.path);
         else this.selected.delete(set.path);
@@ -108,10 +115,24 @@ export default class IconifySetPickerModal extends Modal {
         cls: 'iconize-iconify-set-prefix',
         text: set.prefix,
       });
+      if (set.size)
+        label.createSpan({
+          cls: 'iconize-iconify-set-size',
+          text: `${(set.size / 1024 / 1024).toFixed(1)} MB${
+            tooLarge ? ' · 过大' : ''
+          }`,
+        });
       label.createSpan({
         cls: 'iconize-iconify-set-path',
         text: set.path,
       });
+      if (tooLarge)
+        label.setAttribute(
+          'title',
+          `超过 ${Math.round(
+            MAX_ICONIFY_JSON_BYTES / 1024 / 1024,
+          )} MB，单包转换会耗尽内存，已禁用`,
+        );
     }
     if (!matches.length)
       this.listEl.createEl('p', { text: '没有匹配的图标集。' });

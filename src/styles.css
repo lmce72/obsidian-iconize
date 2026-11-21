@@ -612,3 +612,12 @@
   color: var(--text-muted);
   font-size: var(--font-ui-small);
 }
+.iconize-iconify-set-size {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.iconize-iconify-set-row.is-too-large {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

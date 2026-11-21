@@ -89,4 +89,13 @@ describe('zip reader', () => {
     expect(await reader!.readText('icons/home.svg')).toBe('<svg/>');
     expect(await reader!.readText('icons/missing.svg')).toBeNull();
   });
+
+  it('applies a caller-provided size limit instead of the SVG limit', async () => {
+    const content = 'x'.repeat(100);
+    const reader = await openArchive(zipSync({ 'set.json': strToU8(content) }));
+    expect(await reader!.sizeOf('set.json')).toBe(100);
+    await expect(reader!.readText('set.json', 10)).rejects.toThrow(/limit/);
+    expect(await reader!.readText('set.json', 1000)).toBe(content);
+    expect(await reader!.sizeOf('missing.json')).toBeNull();
+  });
 });

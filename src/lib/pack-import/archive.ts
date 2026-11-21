@@ -17,6 +17,14 @@ import { throwIfAborted } from '../task-scheduler';
 const MAX_INFLATED_BYTES = 512 * 1024 * 1024;
 /** 条目数上限，防止异常归档耗尽内存 / Entry-count ceiling. */
 const MAX_ENTRIES = 200_000;
+/**
+ * JSON / CSS / 字体等文本或资源的读取上限。图标的 8 MB 限制不能套在 Iconify
+ * 的整套 JSON 上（部分集合超过 8 MB）。
+ *
+ * Read ceiling for JSON/CSS/font entries. The 8 MB icon limit must not apply to a whole
+ * Iconify set JSON; several sets exceed 8 MB.
+ */
+export const MAX_TEXT_ENTRY_BYTES = 128 * 1024 * 1024;
 
 export type ArchiveKind = 'zip' | 'tar';
 
@@ -24,8 +32,10 @@ export interface ArchiveReader {
   readonly kind: ArchiveKind;
   /** 文件条目名（不含目录）/ File entry names, without directories. */
   readonly names: string[];
-  readBytes(name: string): Promise<Uint8Array | null>;
-  readText(name: string): Promise<string | null>;
+  readBytes(name: string, maxBytes?: number): Promise<Uint8Array | null>;
+  readText(name: string, maxBytes?: number): Promise<string | null>;
+  /** 解压后大小，未知时返回 `null` / Inflated size, or `null` when unknown. */
+  sizeOf(name: string): Promise<number | null>;
 }
 
 /** 按魔数判断归档类型 / Sniffs the archive type from magic bytes. */
@@ -59,13 +69,17 @@ class ZipArchiveReader implements ArchiveReader {
     readonly names: string[],
   ) {}
 
-  async readBytes(name: string): Promise<Uint8Array | null> {
-    return this.directory.readBytes(name);
+  async readBytes(name: string, maxBytes?: number): Promise<Uint8Array | null> {
+    return this.directory.readBytes(name, maxBytes);
   }
 
-  async readText(name: string): Promise<string | null> {
-    const bytes = await this.readBytes(name);
+  async readText(name: string, maxBytes?: number): Promise<string | null> {
+    const bytes = await this.readBytes(name, maxBytes);
     return bytes ? strFromU8(bytes) : null;
+  }
+
+  async sizeOf(name: string): Promise<number | null> {
+    return this.directory.sizeOf(name);
   }
 }
 
@@ -83,15 +97,24 @@ class TarArchiveReader implements ArchiveReader {
     private readonly entries: Map<string, TarEntry>,
   ) {}
 
-  async readBytes(name: string): Promise<Uint8Array | null> {
+  async readBytes(name: string, maxBytes?: number): Promise<Uint8Array | null> {
     const entry = this.entries.get(name);
     if (!entry) return null;
+    const limit = maxBytes ?? 8 * 1024 * 1024;
+    if (entry.size > limit)
+      throw new Error(
+        `Archive entry exceeds the ${Math.round(limit / 1024 / 1024)} MB limit`,
+      );
     return this.data.slice(entry.offset, entry.offset + entry.size);
   }
 
-  async readText(name: string): Promise<string | null> {
-    const bytes = await this.readBytes(name);
+  async readText(name: string, maxBytes?: number): Promise<string | null> {
+    const bytes = await this.readBytes(name, maxBytes);
     return bytes ? strFromU8(bytes) : null;
+  }
+
+  async sizeOf(name: string): Promise<number | null> {
+    return this.entries.get(name)?.size ?? null;
   }
 }
 

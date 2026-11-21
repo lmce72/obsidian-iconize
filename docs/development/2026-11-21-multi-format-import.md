@@ -45,7 +45,7 @@
 ## 格式细节
 
 - **Iconify JSON**：支持 `width/height/left/top`、`aliases` 的 `parent`、`hFlip`、`vFlip`、`rotate`，别名链最多 8 层；无法解析父图标的名称计入跳过。
-- **Iconify 图标集归档**：识别 `json/*.json`（icon-sets 仓库）或多个 Iconify JSON 的归档。先列出集合让用户勾选，只读取选中的 JSON；选择多个集合时用各自 prefix 作为目录（`mdi/home.svg`、`tabler/home.svg`），只选一个时包名取该 prefix、图标平铺。全部选中可能包含数十万图标，选择器会提示。
+- **Iconify 图标集归档**：识别 `json/*.json`（icon-sets 仓库）或多个 Iconify JSON 的归档。先列出集合让用户勾选，只读取选中的 JSON；选择多个集合时用各自 prefix 作为目录（`mdi/home.svg`、`tabler/home.svg`），只选一个时包名取该 prefix、图标平铺。非 SVG 条目使用 128 MB 读取上限，不再套用图标的 8 MB 限制；单个集合超过 64 MB 时选择器禁用并标注「过大」，转换时跳过并给出原因。全部选中可能包含数十万图标，选择器会提示。
 - **SVG Sprite**：拆出每个 `<symbol>`，保留 `id`、`viewBox` 和 symbol 上的表现属性。
 - **JS 图标模块**：只读源码文本，不执行；按「目录 + 名称」去重，因此 `16/solid`、`20/solid`、`24/solid`、`24/outline` 四套风格都会保留；ESM 与非 ESM 双构建按路径去重。
 - **字体**：opentype.js 2.0 解析 TTF/OTF/WOFF。优先使用 CSS 的类名 → 码位映射（`content:"\f007"` 与 Font Awesome 7 的 `--fa:"\f007"` 都支持），缺少 CSS 时退回字形名。WOFF2 会在输入前按魔数拒绝，并提示改用 TTF/OTF/WOFF 或 SVG 包。多个字体文件按 TTF → OTF → WOFF 顺序尝试，单个字体解析失败不会连累同包其它字体。
@@ -54,33 +54,34 @@
 
 测试素材位于 `/home/corevortex/iconize-pack-tests/packs`（不入库）。每个包都执行「归一化 → 用真实索引算法建立索引」，检查图标数、重复 id、非法首字符与归档大小。
 
-| 包                                    | 识别                        | 图标  | 索引  | 跳过                           | ZIP        |
-| ------------------------------------- | --------------------------- | ----- | ----- | ------------------------------ | ---------- |
-| Lucide 仓库                           | SVG 归档                    | 2098  | 2098  | 549（docs/lab）                | 0.65 MiB   |
-| Bootstrap Icons 仓库                  | SVG 归档                    | 2078  | 2078  | 2                              | 0.86 MiB   |
-| Remix Icon 仓库                       | SVG 归档                    | 3229  | 3229  | 8                              | 1.41 MiB   |
-| Heroicons 仓库                        | SVG 归档（`src/`）          | 1288  | 1288  | 1292（`optimized/` 重复）      | 0.71 MiB   |
-| Tabler 仓库                           | SVG 归档                    | 6545  | 6545  | 234                            | 2.27 MiB   |
-| Iconify MDI                           | Iconify JSON                | 14001 | 14001 | 0                              | 4.70 MiB   |
-| Iconify Tabler                        | Iconify JSON                | 6788  | 6788  | 0                              | 2.13 MiB   |
-| Iconify Phosphor                      | Iconify JSON                | 9198  | 9198  | 0                              | 3.48 MiB   |
-| Iconify icon-sets 归档（选 bytesize） | Iconify 图标集归档          | 102   | 102   | 0                              | 0.03 MiB   |
-| Disarto sprite                        | SVG Sprite                  | 752   | 752   | 0                              | 0.29 MiB   |
-| Font Awesome sprite                   | SVG Sprite                  | 1422  | 1422  | 0                              | 0.60 MiB   |
-| MDI 单文件                            | 单图标                      | 1     | 1     | 0                              | < 0.01 MiB |
-| lucide-static npm                     | SVG 归档（`package/icons`） | 2410  | 2410  | 3                              | 0.80 MiB   |
-| Tabler npm                            | SVG 归档（`package/icons`） | 6545  | 6545  | 5491（`categories/` 重复）     | 2.62 MiB   |
-| Heroicons React npm                   | JS 图标模块                 | 1288  | 1288  | 1288（ESM 副本）               | 0.48 MiB   |
-| Font Awesome TTF                      | 字体（字形名）              | 1401  | 1401  | 1                              | 0.67 MiB   |
-| Font Awesome TTF + all.css            | 字体（CSS 映射）            | 1932  | 1932  | 633（字体不含 brands/regular） | 0.92 MiB   |
-| Material Symbols TTF                  | 字体（字形名）              | 6649  | 6649  | 3                              | 2.99 MiB   |
-| Bootstrap Icons WOFF + CSS            | 字体（CSS 映射）            | 2078  | 2078  | 0                              | 1.08 MiB   |
+| 包                                                  | 识别                        | 图标  | 索引  | 跳过                           | ZIP        |
+| --------------------------------------------------- | --------------------------- | ----- | ----- | ------------------------------ | ---------- |
+| Lucide 仓库                                         | SVG 归档                    | 2098  | 2098  | 549（docs/lab）                | 0.65 MiB   |
+| Bootstrap Icons 仓库                                | SVG 归档                    | 2078  | 2078  | 2                              | 0.86 MiB   |
+| Remix Icon 仓库                                     | SVG 归档                    | 3229  | 3229  | 8                              | 1.41 MiB   |
+| Heroicons 仓库                                      | SVG 归档（`src/`）          | 1288  | 1288  | 1292（`optimized/` 重复）      | 0.71 MiB   |
+| Tabler 仓库                                         | SVG 归档                    | 6545  | 6545  | 234                            | 2.27 MiB   |
+| Iconify MDI                                         | Iconify JSON                | 14001 | 14001 | 0                              | 4.70 MiB   |
+| Iconify Tabler                                      | Iconify JSON                | 6788  | 6788  | 0                              | 2.13 MiB   |
+| Iconify Phosphor                                    | Iconify JSON                | 9198  | 9198  | 0                              | 3.48 MiB   |
+| Iconify icon-sets 归档（选 bytesize）               | Iconify 图标集归档          | 102   | 102   | 0                              | 0.03 MiB   |
+| Iconify icon-sets 归档（选 material-symbols-light） | Iconify 图标集归档          | 24167 | 24167 | 0                              | 10.92 MiB  |
+| Disarto sprite                                      | SVG Sprite                  | 752   | 752   | 0                              | 0.29 MiB   |
+| Font Awesome sprite                                 | SVG Sprite                  | 1422  | 1422  | 0                              | 0.60 MiB   |
+| MDI 单文件                                          | 单图标                      | 1     | 1     | 0                              | < 0.01 MiB |
+| lucide-static npm                                   | SVG 归档（`package/icons`） | 2410  | 2410  | 3                              | 0.80 MiB   |
+| Tabler npm                                          | SVG 归档（`package/icons`） | 6545  | 6545  | 5491（`categories/` 重复）     | 2.62 MiB   |
+| Heroicons React npm                                 | JS 图标模块                 | 1288  | 1288  | 1288（ESM 副本）               | 0.48 MiB   |
+| Font Awesome TTF                                    | 字体（字形名）              | 1401  | 1401  | 1                              | 0.67 MiB   |
+| Font Awesome TTF + all.css                          | 字体（CSS 映射）            | 1932  | 1932  | 633（字体不含 brands/regular） | 0.92 MiB   |
+| Material Symbols TTF                                | 字体（字形名）              | 6649  | 6649  | 3                              | 2.99 MiB   |
+| Bootstrap Icons WOFF + CSS                          | 字体（CSS 映射）            | 2078  | 2078  | 0                              | 1.08 MiB   |
 
 字体图标使用「em 盒 ∪ 全部选中字形包围盒」的公共 viewBox。Font Awesome 有 38% 的 CSS 匹配图标超出 512 单位的 em 宽度（最宽 640），只用 em 盒会裁边；Bootstrap 的 descender 为 0，部分字形低于基线。公共视野同时保留字体相对尺寸与基线。
 
 归一化耗时（隔离 Linux 机器）：Tabler 仓库约 1.6–1.8 s，Iconify MDI 约 1.3–1.5 s，其余大多数在 0.2–1.2 s。最大的单包归档为 MDI 的 4.70 MiB（含 6363 个别名）。
 
-`~/下载/iconify.zip` 实测：icon-sets 仓库 145 MiB、285 个集合；选择器列出 285 个集合，只读取 `json/bytesize.json` 时得到 102 个图标，归一化 0.03 MiB、44 ms。选择多个集合时用 prefix 分目录；全部选中会生成非常大的归档，建议按需勾选。
+`~/下载/iconify.zip` 实测：icon-sets 仓库 145 MiB、285 个集合；选择器列出 285 个集合，只读取 `json/bytesize.json` 时得到 102 个图标，归一化 0.03 MiB、44 ms。选择 `material-symbols-light`（JSON 10.9 MiB）得到 24,167 个图标，归一化 10.92 MiB、约 2.3 s。`fluent-emoji` 等超过 64 MB 的集合在选择器中禁用并标注「过大」，转换时跳过。选择多个集合时用 prefix 分目录；全部选中会生成非常大的归档，建议按需勾选。
 
 ## 对抗性审查后的修正
 
